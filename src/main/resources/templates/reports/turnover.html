@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Оборотная ведомость')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page page-wide">
+    <div class="page-title">
+        <div><p class="eyebrow">Хранимая функция sp_turnover_statement</p><h1>Оборотная ведомость за <span th:text="${year}">2017</span> год</h1></div>
+        <form method="get" class="compact-form">
+            <label>Год<input name="year" type="number" min="2000" max="2100" th:value="${year}" required></label>
+            <button class="button primary" type="submit">Показать</button>
+        </form>
+    </div>
+
+    <section class="card report-card">
+        <div class="card-head">
+            <h2>По квартире</h2>
+            <span class="hint">В клетке: начисление / платеж / сальдо на конец месяца.</span>
+        </div>
+        <div class="table-wrap">
+            <table class="turnover-table">
+                <thead>
+                <tr>
+                    <th>Квартира</th>
+                    <th>Вх. сальдо</th>
+                    <th th:each="m : ${#numbers.sequence(1,12)}" th:text="${m < 10 ? '0' + m : m}">01</th>
+                    <th>Исх. сальдо</th>
+                </tr>
+                </thead>
+                <tbody>
+                <tr th:each="apt : ${apartments}">
+                    <td class="strong" th:text="${apt.apartmentNumber}">1</td>
+                    <td class="money" th:text="${apt.openingBalance == null ? '—' : #numbers.formatDecimal(apt.openingBalance,1,2)}">0.00</td>
+                    <td th:each="cell : ${apt.months}" class="month-cell" th:classappend="${!cell.present ? 'not-stored' : ''}">
+                        <span th:text="${#numbers.formatDecimal(cell.charges,1,2)}">0.00</span><br>
+                        <span th:text="${#numbers.formatDecimal(cell.payments,1,2)}">0.00</span><br>
+                        <span class="closing" th:text="${cell.closingBalance == null ? '0.00' : #numbers.formatDecimal(cell.closingBalance,1,2)}">0.00</span>
+                        <small th:if="${cell.actionAt != null}" th:text="${@timeFormat.format(cell.actionAt)}">—</small>
+                        <small th:if="${cell.actionAt == null}" class="muted">нет записи</small>
+                    </td>
+                    <td class="money strong" th:text="${#numbers.formatDecimal(apt.outgoingBalance,1,2)}">0.00</td>
+                </tr>
+                <tr th:if="${#lists.isEmpty(apartments)}"><td colspan="15" class="empty">За выбранный год данных нет.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="legend card">
+        <div><b>Первая строка</b><span>начисления по квартире за месяц</span></div>
+        <div><b>Вторая строка</b><span>платежи по квартире за месяц</span></div>
+        <div><b>Третья строка</b><span>сальдо на конец месяца; ниже время последнего действия</span></div>
+    </section>
+</main>
+</body>
+</html>

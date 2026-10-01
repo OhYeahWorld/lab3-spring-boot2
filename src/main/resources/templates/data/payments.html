@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Платежи')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <div class="page-title"><div><p class="eyebrow">Таблица payments</p><h1>Платежи по лицевому счету</h1></div></div>
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="card form-card">
+        <div class="card-head"><h2 th:text="${paymentForm.id == null ? 'Добавить платеж' : 'Изменить платеж'}">Добавить платеж</h2><span class="hint">Одинаковые квартира + период + дата + сумма повторно сохранить нельзя.</span></div>
+        <form th:action="@{/data/payments}" th:object="${paymentForm}" method="post" class="form-grid">
+            <input type="hidden" th:field="*{id}">
+            <label>Квартира
+                <input type="number" min="1" th:field="*{apartmentNumber}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('apartmentNumber')}" th:errors="*{apartmentNumber}"></small>
+            </label>
+            <label>Период
+                <input type="month" th:field="*{period}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('period')}" th:errors="*{period}"></small>
+            </label>
+            <label>Дата платежа
+                <input type="date" th:field="*{paymentDate}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('paymentDate')}" th:errors="*{paymentDate}"></small>
+            </label>
+            <label>Сумма
+                <input type="number" min="0.01" step="0.01" th:field="*{amount}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('amount')}" th:errors="*{amount}"></small>
+            </label>
+            <label>Номер / ссылка платежа
+                <input type="text" maxlength="100" th:field="*{paymentReference}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('paymentReference')}" th:errors="*{paymentReference}"></small>
+            </label>
+            <button class="button primary" type="submit" th:text="${paymentForm.id == null ? 'Добавить' : 'Сохранить изменения'}">Добавить</button>
+            <a class="button ghost" th:if="${paymentForm.id != null}" th:href="@{/data/payments}">Отмена</a>
+        </form>
+    </section>
+
+    <section class="card">
+        <div class="card-head"><h2>История платежей</h2><span class="hint">Время создания и последнего изменения сохраняется.</span></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Квартира</th><th>Период</th><th>Дата</th><th>Сумма</th><th>Реквизит</th><th>Создано</th><th>Изменено</th><th></th></tr></thead>
+                <tbody>
+                <tr th:each="row : ${rows}">
+                    <td th:text="${row.apartmentNumber}">1</td>
+                    <td th:text="${#temporals.format(row.period, 'MM.yyyy')}">01.2017</td>
+                    <td th:text="${#temporals.format(row.paymentDate, 'dd.MM.yyyy')}">15.01.2017</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.amount,1,2)}">0.00</td>
+                    <td th:text="${row.paymentReference}">REF</td>
+                    <td th:text="${@timeFormat.format(row.createdAt)}">—</td>
+                    <td th:text="${@timeFormat.format(row.updatedAt)}">—</td>
+                    <td class="actions">
+                        <a class="table-link" th:href="@{/data/payments(edit=${row.id})}">Изменить</a>
+                        <form th:action="@{/data/payments/{id}/delete(id=${row.id})}" method="post" onsubmit="return confirm('Удалить платеж?');">
+                            <button class="table-link danger" type="submit">Удалить</button>
+                        </form>
+                    </td>
+                </tr>
+                <tr th:if="${#lists.isEmpty(rows)}"><td colspan="8" class="empty">Записей пока нет.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+</body>
+</html>

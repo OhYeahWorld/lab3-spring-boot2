@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Сальдо')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <div class="page-title">
+        <div><p class="eyebrow">Таблица saldo</p><h1>Сальдо по лицевым счетам</h1></div>
+    </div>
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="card form-card">
+        <div class="card-head">
+            <h2>Добавить период</h2>
+            <span class="hint">Входящее следующего периода автоматически сверяется с исходящим предыдущего.</span>
+        </div>
+        <form th:action="@{/data/saldo}" th:object="${saldoForm}" method="post" class="form-grid">
+            <label>Квартира
+                <input type="number" min="1" th:field="*{apartmentNumber}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('apartmentNumber')}" th:errors="*{apartmentNumber}"></small>
+            </label>
+            <label>Период
+                <input type="month" th:field="*{period}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('period')}" th:errors="*{period}"></small>
+            </label>
+            <label>Входящее сальдо
+                <input type="number" step="0.01" th:field="*{openingBalance}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('openingBalance')}" th:errors="*{openingBalance}"></small>
+            </label>
+            <div class="form-note">Исходящее сальдо рассчитывается автоматически: входящее + начисления − платежи.</div>
+            <button class="button primary" type="submit">Сохранить сальдо</button>
+        </form>
+    </section>
+
+    <section class="card">
+        <div class="card-head"><h2>Сохраненные записи</h2><span class="hint">Время показывает создание и последнее изменение.</span></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Квартира</th><th>Период</th><th>Входящее</th><th>Исходящее</th><th>Создано</th><th>Изменено</th></tr></thead>
+                <tbody>
+                <tr th:each="row : ${rows}">
+                    <td th:text="${row.apartmentNumber}">1</td>
+                    <td th:text="${#temporals.format(row.period, 'MM.yyyy')}">01.2017</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.openingBalance,1,2)}">0.00</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.closingBalance,1,2)}">0.00</td>
+                    <td th:text="${@timeFormat.format(row.createdAt)}">01.01.2017 10:00:00</td>
+                    <td th:text="${@timeFormat.format(row.updatedAt)}">01.01.2017 10:00:00</td>
+                </tr>
+                <tr th:if="${#lists.isEmpty(rows)}"><td colspan="6" class="empty">Записей пока нет.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Главная')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <section class="hero">
+        <div>
+            <p class="eyebrow">Бухгалтерский учет по лицевым счетам</p>
+            <h1>Сальдо · начисления · платежи</h1>
+            <p class="lead">В приложении реализованы три таблицы и три отчетных модуля на основе хранимых функций PostgreSQL.</p>
+        </div>
+    </section>
+
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="grid stats">
+        <a class="stat-card" th:href="@{/data/saldo}">
+            <span>Записей сальдо</span>
+            <strong th:text="${saldoCount}">0</strong>
+        </a>
+        <a class="stat-card" th:href="@{/data/charges}">
+            <span>Начислений</span>
+            <strong th:text="${chargeCount}">0</strong>
+        </a>
+        <a class="stat-card" th:href="@{/data/payments}">
+            <span>Платежей</span>
+            <strong th:text="${paymentCount}">0</strong>
+        </a>
+    </section>
+
+    <section class="card">
+        <div class="card-head"><h2>Правила целостности</h2></div>
+        <div class="rules">
+            <div><b>1.</b><span>Дубли отклоняются и на уровне приложения, и ограничениями UNIQUE в БД.</span></div>
+            <div><b>2.</b><span>Время создания и последнего изменения хранится в каждой записи.</span></div>
+            <div><b>3.</b><span>Формула периода: исходящее сальдо = входящее + начисления − платежи.</span></div>
+            <div><b>4.</b><span>Входящее сальдо следующего имеющегося периода обязано равняться исходящему предыдущего.</span></div>
+        </div>
+    </section>
+
+    <section class="grid links">
+        <a class="link-card" th:href="@{/reports/turnover}"><span>01</span><b>Оборотная ведомость</b><small>Год × квартира × 12 месяцев</small></a>
+        <a class="link-card" th:href="@{/reports/apartment(apartment=1)}"><span>02</span><b>Оборот по квартире</b><small>Начисления и платежи по месяцам</small></a>
+        <a class="link-card" th:href="@{/reports/debtors}"><span>03</span><b>Должники по категориям</b><small>На указанную дату</small></a>
+    </section>
+</main>
+</body>
+</html>

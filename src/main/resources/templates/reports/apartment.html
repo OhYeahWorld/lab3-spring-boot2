@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Оборот по квартире')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page page-wide">
+    <div class="page-title">
+        <div><p class="eyebrow">Хранимая функция sp_apartment_statement</p><h1>Начисления и платежи по квартире</h1></div>
+        <form method="get" class="compact-form">
+            <label>Квартира<input name="apartment" type="number" min="1" th:value="${apartment}" required></label>
+            <label>Год<input name="year" type="number" min="2000" max="2100" th:value="${year}" required></label>
+            <button class="button primary" type="submit">Показать</button>
+        </form>
+    </div>
+
+    <section class="card report-card">
+        <div class="card-head">
+            <h2>Квартира <span th:text="${apartment}">1</span>, <span th:text="${year}">2017</span></h2>
+            <span class="hint">Платеж относится к месяцу его поступления на расчётный счёт.</span>
+        </div>
+        <div class="table-wrap">
+            <table class="apartment-report">
+                <thead>
+                <tr>
+                    <th rowspan="2">На начало года<br><span class="tiny">(+ долг / − переплата)</span></th>
+                    <th th:each="row : ${rows}" th:text="${row.monthNo < 10 ? '0' + row.monthNo : row.monthNo}">01</th>
+                    <th rowspan="2">Итого</th>
+                </tr>
+                <tr class="tiny-head">
+                    <td th:each="row : ${rows}" th:text="${row.actionAt == null ? 'нет записи' : @timeFormat.format(row.actionAt)}">—</td>
+                </tr>
+                </thead>
+                <tbody>
+                <tr>
+                    <th>Начис.</th>
+                    <td th:each="row : ${rows}" class="money" th:text="${#numbers.formatDecimal(row.charges,1,2)}">0.00</td>
+                    <td class="money strong" th:text="${#numbers.formatDecimal(totalCharges,1,2)}">0.00</td>
+                </tr>
+                <tr>
+                    <th>Опл.</th>
+                    <td th:each="row : ${rows}" class="money" th:text="${#numbers.formatDecimal(row.payments,1,2)}">0.00</td>
+                    <td class="money strong" th:text="${#numbers.formatDecimal(totalPayments,1,2)}">0.00</td>
+                </tr>
+                </tbody>
+                <tfoot>
+                <tr>
+                    <th>+ долг / − переплата<br><span class="tiny">за пред. период</span></th>
+                    <td colspan="12" class="money strong" th:text="${#numbers.formatDecimal(previousDebtOrOverpayment,1,2)}">0.00</td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <th>Итого к оплате</th>
+                    <td colspan="12" class="money payable" th:text="${#numbers.formatDecimal(payable,1,2)}">0.00</td>
+                    <td></td>
+                </tr>
+                </tfoot>
+            </table>
+        </div>
+    </section>
+
+    <section class="card report-meta">
+        <span>Исходящее сальдо последнего заполненного периода: </span>
+        <strong th:text="${ending == null ? '—' : #numbers.formatDecimal(ending,1,2)}">—</strong>
+        <span class="meta-time">Отчёт сформирован: <span th:text="${@timeFormat.format(generatedAt)}">—</span></span>
+    </section>
+</main>
+</body>
+</html>

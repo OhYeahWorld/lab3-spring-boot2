@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:fragment="head(title)">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="${title} + ' — Лабораторная №3'">Лабораторная №3</title>
+    <link rel="stylesheet" th:href="@{/css/app.css}">
+</head>
+<body>
+<header class="topbar" th:fragment="nav">
+    <div class="wrap nav-wrap">
+        <a class="brand" th:href="@{/}">Лабораторная №3</a>
+        <nav>
+            <a th:href="@{/data/saldo}">Сальдо</a>
+            <a th:href="@{/data/charges}">Начисления</a>
+            <a th:href="@{/data/payments}">Платежи</a>
+            <span class="nav-sep"></span>
+            <a th:href="@{/reports/turnover}">Оборотная ведомость</a>
+            <a th:href="@{/reports/apartment(apartment=1)}">По квартире</a>
+            <a th:href="@{/reports/debtors}">Должники</a>
+        </nav>
+    </div>
+</header>
+</body>
+</html>

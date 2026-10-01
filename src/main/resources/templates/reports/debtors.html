@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Должники')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page page-wide">
+    <div class="page-title">
+        <div><p class="eyebrow">Хранимая функция sp_debtors_summary</p><h1>Должники по категориям</h1></div>
+        <form method="get" class="compact-form">
+            <label>По состоянию на<input name="asOf" type="date" th:value="${asOf}"></label>
+            <button class="button primary" type="submit">Показать</button>
+        </form>
+    </div>
+
+    <section class="card report-card">
+        <div class="card-head">
+            <h2>По состоянию на <span th:text="${#temporals.format(asOf, 'dd.MM.yyyy')}">01.10.2017</span></h2>
+            <span class="hint">Последний полный месяц перед датой отчета используется для расчёта категории.</span>
+        </div>
+        <div class="table-wrap">
+            <table class="debtors-table">
+                <thead>
+                <tr>
+                    <th rowspan="2">Квартира</th>
+                    <th rowspan="2">Начислено<br>за последний месяц</th>
+                    <th rowspan="2">Сальдо</th>
+                    <th colspan="4">Задолженность</th>
+                    <th rowspan="2">Время действия</th>
+                </tr>
+                <tr>
+                    <th>1 месяц</th><th>2 месяца</th><th>3 месяца</th><th>Свыше 3 месяцев</th>
+                </tr>
+                </thead>
+                <tbody>
+                <tr th:each="row : ${rows}">
+                    <td class="strong" th:text="${row.apartmentNumber}">1</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.lastMonthCharge,1,2)}">0.00</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.balance,1,2)}">0.00</td>
+                    <td class="money" th:text="${row.oneMonth == null ? '' : #numbers.formatDecimal(row.oneMonth,1,2)}"></td>
+                    <td class="money" th:text="${row.twoMonths == null ? '' : #numbers.formatDecimal(row.twoMonths,1,2)}"></td>
+                    <td class="money" th:text="${row.threeMonths == null ? '' : #numbers.formatDecimal(row.threeMonths,1,2)}"></td>
+                    <td class="money" th:text="${row.overThreeMonths == null ? '' : #numbers.formatDecimal(row.overThreeMonths,1,2)}"></td>
+                    <td><span class="badge" th:text="${row.debtCategory}">2 месяца</span><br><small th:text="${@timeFormat.format(row.actionAt)}">—</small></td>
+                </tr>
+                <tr th:if="${#lists.isEmpty(rows)}"><td colspan="8" class="empty">Должников по выбранной дате нет.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+    <p class="subtle">Время действия — максимальное время изменения данных, вошедших в строку отчета. Отчёт сформирован: <span th:text="${@timeFormat.format(generatedAt)}">—</span>.</p>
+</main>
+</body>
+</html>
