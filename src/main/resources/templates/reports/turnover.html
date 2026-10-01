@@ -15,7 +15,7 @@
     <section class="card report-card">
         <div class="card-head">
             <h2>По квартире</h2>
-            <span class="hint">В клетке: начисление / платеж / входящее сальдо на начало месяца.</span>
+            <span class="hint">В клетке: начисление / платеж / входящее сальдо на начало месяца / исходящее сальдо на конец месяца.</span>
         </div>
         <div class="table-wrap">
             <table class="turnover-table">
@@ -34,7 +34,8 @@
                     <td th:each="cell : ${apt.months}" class="month-cell" th:classappend="${!cell.present ? 'not-stored' : ''}">
                         <span th:text="${#numbers.formatDecimal(cell.charges,1,2)}">0.00</span><br>
                         <span th:text="${#numbers.formatDecimal(cell.payments,1,2)}">0.00</span><br>
-                        <span class="closing" th:text="${cell.openingBalance == null ? '0.00' : #numbers.formatDecimal(cell.openingBalance,1,2)}">0.00</span>
+                        <span class="opening" th:text="'вх: ' + (${cell.openingBalance == null ? '—' : #numbers.formatDecimal(cell.openingBalance,1,2)})">0.00</span><br>
+                        <span class="closing" th:text="'исх: ' + (${cell.closingBalance == null ? '—' : #numbers.formatDecimal(cell.closingBalance,1,2)})">0.00</span><br>
                         <small th:if="${cell.actionAt != null}" th:text="${@timeFormat.format(cell.actionAt)}">—</small>
                         <small th:if="${cell.actionAt == null}" class="muted">нет записи</small>
                     </td>
@@ -49,7 +50,8 @@
     <section class="legend card">
         <div><b>Первая строка</b><span>начисления по квартире за месяц</span></div>
         <div><b>Вторая строка</b><span>платежи по квартире за месяц</span></div>
-        <div><b>Третья строка</b><span>входящее сальдо на начало месяца; ниже время последнего действия</span></div>
+        <div><b>«вх:»</b><span>входящее сальдо на начало месяца</span></div>
+        <div><b>«исх:»</b><span>исходящее сальдо на конец месяца; ниже время последнего действия</span></div>
     </section>
 </main>
 </body>

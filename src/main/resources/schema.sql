@@ -140,7 +140,8 @@ DROP FUNCTION IF EXISTS sp_debtors_summary(DATE);
 
 -- ==============================================================
 -- 1. Оборотная ведомость за год.
--- В ячейке месяца: начисления / платежи / входящее сальдо на начало месяца.
+-- В каждой ячейке месяца: начисления / платежи /
+-- входящее сальдо на начало месяца и исходящее сальдо на конец месяца.
 -- ==============================================================
 DROP FUNCTION IF EXISTS sp_turnover_statement(INTEGER);
 CREATE OR REPLACE FUNCTION sp_turnover_statement(p_year INTEGER)
@@ -152,6 +153,7 @@ RETURNS TABLE (
     charges_total NUMERIC(14,2),
     payments_total NUMERIC(14,2),
     month_opening_balance NUMERIC(14,2),
+    month_closing_balance NUMERIC(14,2),
     action_at TIMESTAMPTZ,
     outgoing_balance NUMERIC(14,2)
 )
@@ -187,6 +189,23 @@ rows AS (
                      AND prev.period < make_date(p_year, m.month_no, 1)
                    ORDER BY prev.period DESC
                    LIMIT 1)) AS month_opening_balance,
+        -- исходящее сальдо месяца: из saldo, иначе рассчитывается по цепочке:
+        -- входящее + начисления - платежи.
+        COALESCE(s.closing_balance,
+                 COALESCE(s.opening_balance,
+                          (SELECT prev.closing_balance
+                             FROM saldo prev
+                            WHERE prev.apartment_number = a.apartment_number
+                              AND prev.period < make_date(p_year, m.month_no, 1)
+                            ORDER BY prev.period DESC
+                            LIMIT 1), 0)
+                 + COALESCE((SELECT SUM(c.amount) FROM charges c
+                              WHERE c.apartment_number = a.apartment_number
+                                AND c.period = make_date(p_year, m.month_no, 1)), 0)
+                 - COALESCE((SELECT SUM(p.amount) FROM payments p
+                              WHERE p.apartment_number = a.apartment_number
+                                AND p.period = make_date(p_year, m.month_no, 1)), 0)
+                )::NUMERIC(14,2) AS month_closing_balance,
         GREATEST(
             COALESCE(s.updated_at, '-infinity'::timestamptz),
             COALESCE((SELECT MAX(GREATEST(c.created_at, c.updated_at)) FROM charges c
@@ -229,6 +248,7 @@ SELECT r.apartment_number,
        r.charges_total,
        r.payments_total,
        r.month_opening_balance,
+       r.month_closing_balance,
        NULLIF(r.action_at, '-infinity'::timestamptz),
        y.outgoing_balance
   FROM rows r

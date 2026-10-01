@@ -8,6 +8,7 @@ public record TurnoverCell(
         BigDecimal charges,
         BigDecimal payments,
         BigDecimal openingBalance,
+        BigDecimal closingBalance,
         Instant actionAt,
         boolean present) {
 }

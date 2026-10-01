@@ -10,6 +10,7 @@ public record TurnoverRow(
         BigDecimal charges,
         BigDecimal payments,
         BigDecimal monthOpeningBalance,
+        BigDecimal monthClosingBalance,
         Instant actionAt,
         BigDecimal outgoingBalance) {
 }
