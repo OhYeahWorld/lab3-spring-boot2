@@ -94,6 +94,7 @@ tr:last-child td { border-bottom: 0; }
 .turnover-table { min-width: 1410px; }
 .turnover-table th, .turnover-table td { padding: 8px 7px; text-align: center; }
 .turnover-table td.month-cell { min-width: 96px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.month-cell .opening { color: #4a6fa5; }
 .month-cell .closing { font-weight: 800; }
 .month-cell small { display: block; color: #8892a0; margin-top: 3px; font-size: 9px; white-space: nowrap; }
 .muted { color: #a0a7b0; }
