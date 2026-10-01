@@ -140,8 +140,9 @@ DROP FUNCTION IF EXISTS sp_debtors_summary(DATE);
 
 -- ==============================================================
 -- 1. Оборотная ведомость за год.
--- В ячейке месяца: начисления / платежи / сальдо на конец месяца.
+-- В ячейке месяца: начисления / платежи / входящее сальдо на начало месяца.
 -- ==============================================================
+DROP FUNCTION IF EXISTS sp_turnover_statement(INTEGER);
 CREATE OR REPLACE FUNCTION sp_turnover_statement(p_year INTEGER)
 RETURNS TABLE (
     apartment_number INTEGER,
@@ -150,7 +151,7 @@ RETURNS TABLE (
     month_start DATE,
     charges_total NUMERIC(14,2),
     payments_total NUMERIC(14,2),
-    closing_balance NUMERIC(14,2),
+    month_opening_balance NUMERIC(14,2),
     action_at TIMESTAMPTZ,
     outgoing_balance NUMERIC(14,2)
 )
@@ -178,7 +179,14 @@ rows AS (
         COALESCE((SELECT SUM(p.amount) FROM payments p
                    WHERE p.apartment_number = a.apartment_number
                      AND p.period = make_date(p_year, m.month_no, 1)), 0)::NUMERIC(14,2) AS payments_total,
-        s.closing_balance,
+        -- входящее сальдо месяца: из saldo, иначе — исходящее предыдущего имеющегося периода.
+        COALESCE(s.opening_balance,
+                 (SELECT prev.closing_balance
+                    FROM saldo prev
+                   WHERE prev.apartment_number = a.apartment_number
+                     AND prev.period < make_date(p_year, m.month_no, 1)
+                   ORDER BY prev.period DESC
+                   LIMIT 1)) AS month_opening_balance,
         GREATEST(
             COALESCE(s.updated_at, '-infinity'::timestamptz),
             COALESCE((SELECT MAX(GREATEST(c.created_at, c.updated_at)) FROM charges c
@@ -203,12 +211,16 @@ opening AS (
      ORDER BY apartment_number, month_no
 ),
 year_end AS (
-    SELECT DISTINCT ON (apartment_number)
-           apartment_number,
-           COALESCE(closing_balance, 0)::NUMERIC(14,2) AS outgoing_balance
-      FROM rows
-     WHERE month_no = 12
-     ORDER BY apartment_number
+    -- Исходящее за год: входящее сальдо января следующего года;
+    -- если его нет — последнее известное входящее сальдо декабря.
+    SELECT r.apartment_number,
+           COALESCE((SELECT nx.opening_balance
+                       FROM saldo nx
+                      WHERE nx.apartment_number = r.apartment_number
+                        AND nx.period = make_date(p_year + 1, 1, 1)),
+                    r.month_opening_balance, 0)::NUMERIC(14,2) AS outgoing_balance
+      FROM rows r
+     WHERE r.month_no = 12
 )
 SELECT r.apartment_number,
        o.opening_balance,
@@ -216,7 +228,7 @@ SELECT r.apartment_number,
        r.month_start,
        r.charges_total,
        r.payments_total,
-       r.closing_balance,
+       r.month_opening_balance,
        NULLIF(r.action_at, '-infinity'::timestamptz),
        y.outgoing_balance
   FROM rows r

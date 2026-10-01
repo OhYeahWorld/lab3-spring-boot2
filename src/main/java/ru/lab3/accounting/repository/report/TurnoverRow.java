@@ -9,7 +9,7 @@ public record TurnoverRow(
         Integer monthNo,
         BigDecimal charges,
         BigDecimal payments,
-        BigDecimal closingBalance,
+        BigDecimal monthOpeningBalance,
         Instant actionAt,
         BigDecimal outgoingBalance) {
 }

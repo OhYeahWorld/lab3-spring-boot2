@@ -21,7 +21,7 @@ public class ReportRepository {
 
     public List<TurnoverRow> turnover(int year) {
         return jdbcTemplate.query(
-                "select apartment_number, opening_balance, month_no, month_start, charges_total, payments_total, closing_balance, action_at, outgoing_balance " +
+                "select apartment_number, opening_balance, month_no, month_start, charges_total, payments_total, month_opening_balance, action_at, outgoing_balance " +
                         "from sp_turnover_statement(?)",
                 ps -> ps.setInt(1, year),
                 (rs, rowNum) -> new TurnoverRow(
@@ -30,7 +30,7 @@ public class ReportRepository {
                         rs.getInt("month_no"),
                         rs.getBigDecimal("charges_total"),
                         rs.getBigDecimal("payments_total"),
-                        rs.getBigDecimal("closing_balance"),
+                        rs.getBigDecimal("month_opening_balance"),
                         toInstant(rs.getTimestamp("action_at")),
                         rs.getBigDecimal("outgoing_balance"))
         );

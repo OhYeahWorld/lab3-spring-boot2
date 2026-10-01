@@ -63,9 +63,10 @@ public class ReportController {
                                 .orElse(null);
                         BigDecimal charges = r == null || r.charges() == null ? BigDecimal.ZERO.setScale(2) : r.charges();
                         BigDecimal payments = r == null || r.payments() == null ? BigDecimal.ZERO.setScale(2) : r.payments();
-                        BigDecimal closing = r == null ? null : r.closingBalance();
-                        boolean hasStoredData = closing != null || charges.signum() != 0 || payments.signum() != 0;
-                        months.add(new TurnoverCell(month, charges, payments, closing,
+                        // В ячейке показываем входящее сальдо на начало месяца.
+                        BigDecimal monthOpening = r == null ? opening : r.monthOpeningBalance();
+                        boolean hasStoredData = monthOpening != null || charges.signum() != 0 || payments.signum() != 0;
+                        months.add(new TurnoverCell(month, charges, payments, monthOpening,
                                 r == null ? null : r.actionAt(), hasStoredData));
                     }
                     return new TurnoverApartmentView(entry.getKey(), opening, months, outgoing);

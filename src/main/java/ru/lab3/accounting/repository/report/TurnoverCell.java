@@ -7,7 +7,7 @@ public record TurnoverCell(
         int monthNo,
         BigDecimal charges,
         BigDecimal payments,
-        BigDecimal closingBalance,
+        BigDecimal openingBalance,
         Instant actionAt,
         boolean present) {
 }
