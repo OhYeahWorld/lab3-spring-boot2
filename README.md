@@ -100,7 +100,7 @@ DB_PASSWORD=lab3
 
 В `schema.sql`:
 
-- `sp_turnover_statement(year)` — годовая оборотная ведомость;
+- `sp_turnover_statement(year)` — годовая оборотная ведомость (в каждой ячейке месяца: начисления / платежи / входящее сальдо на начало периода);
 - `sp_apartment_statement(apartment, year)` — начисления и платежи по квартире;
 - `sp_debtors_summary(as_of)` — сводка по категориям должников.
 
