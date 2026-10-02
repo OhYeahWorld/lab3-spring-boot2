@@ -8,7 +8,7 @@
     <div th:replace="~{fragments/messages :: messages}"></div>
 
     <section class="card form-card">
-        <div class="card-head"><h2 th:text="${paymentForm.id == null ? 'Добавить платеж' : 'Изменить платеж'}">Добавить платеж</h2><span class="hint">Одинаковые квартира + период + дата + сумма повторно сохранить нельзя.</span></div>
+        <div class="card-head"><h2 th:text="${paymentForm.id == null ? 'Добавить платеж' : 'Изменить платеж'}">Добавить платеж</h2><span class="hint">Одинаковые квартира + период + время из выписки + сумма повторно сохранить нельзя.</span></div>
         <form th:action="@{/data/payments}" th:object="${paymentForm}" method="post" class="form-grid">
             <input type="hidden" th:field="*{id}">
             <label>Квартира
@@ -19,9 +19,9 @@
                 <input type="month" th:field="*{period}" required>
                 <small class="field-error" th:if="${#fields.hasErrors('period')}" th:errors="*{period}"></small>
             </label>
-            <label>Дата платежа
-                <input type="date" th:field="*{paymentDate}" required>
-                <small class="field-error" th:if="${#fields.hasErrors('paymentDate')}" th:errors="*{paymentDate}"></small>
+            <label>Время платежа из выписки
+                <input type="datetime-local" step="60" th:field="*{paymentTime}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('paymentTime')}" th:errors="*{paymentTime}"></small>
             </label>
             <label>Сумма
                 <input type="number" min="0.01" step="0.01" th:field="*{amount}" required>
@@ -40,12 +40,12 @@
         <div class="card-head"><h2>История платежей</h2><span class="hint">Время создания и последнего изменения сохраняется.</span></div>
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Квартира</th><th>Период</th><th>Дата</th><th>Сумма</th><th>Реквизит</th><th>Создано</th><th>Изменено</th><th></th></tr></thead>
+                <thead><tr><th>Квартира</th><th>Период</th><th>Время платежа (выписка)</th><th>Сумма</th><th>Реквизит</th><th>Создано</th><th>Изменено</th><th></th></tr></thead>
                 <tbody>
                 <tr th:each="row : ${rows}">
                     <td th:text="${row.apartmentNumber}">1</td>
                     <td th:text="${#temporals.format(row.period, 'MM.yyyy')}">01.2017</td>
-                    <td th:text="${#temporals.format(row.paymentDate, 'dd.MM.yyyy')}">15.01.2017</td>
+                    <td th:text="${#temporals.format(row.paymentTime, 'dd.MM.yyyy HH:mm')}">15.01.2017 10:30</td>
                     <td class="money" th:text="${#numbers.formatDecimal(row.amount,1,2)}">0.00</td>
                     <td th:text="${row.paymentReference}">REF</td>
                     <td th:text="${@timeFormat.format(row.createdAt)}">—</td>

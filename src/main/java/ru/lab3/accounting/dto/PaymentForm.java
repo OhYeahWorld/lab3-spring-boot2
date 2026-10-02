@@ -19,7 +19,7 @@ public class PaymentForm {
     private String period;
 
     @NotBlank
-    private String paymentDate;
+    private String paymentTime;
 
     @NotNull
     @DecimalMin(value = "0.01")
@@ -35,8 +35,8 @@ public class PaymentForm {
     public void setApartmentNumber(Integer apartmentNumber) { this.apartmentNumber = apartmentNumber; }
     public String getPeriod() { return period; }
     public void setPeriod(String period) { this.period = period; }
-    public String getPaymentDate() { return paymentDate; }
-    public void setPaymentDate(String paymentDate) { this.paymentDate = paymentDate; }
+    public String getPaymentTime() { return paymentTime; }
+    public void setPaymentTime(String paymentTime) { this.paymentTime = paymentTime; }
     public BigDecimal getAmount() { return amount; }
     public void setAmount(BigDecimal amount) { this.amount = amount; }
     public String getPaymentReference() { return paymentReference; }

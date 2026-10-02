@@ -18,6 +18,7 @@ import ru.lab3.accounting.repository.SaldoRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.Comparator;
 import java.util.List;
@@ -140,19 +141,19 @@ public class LedgerService {
     @Transactional
     public Payment createPayment(PaymentForm form) {
         LocalDate period = parsePeriod(form.getPeriod());
-        LocalDate paymentDate = parseDate(form.getPaymentDate(), "дата платежа");
+        LocalDateTime paymentTime = parseDateTime(form.getPaymentTime(), "время платежа");
         Integer apartment = form.getApartmentNumber();
         BigDecimal amount = normalizePositive(form.getAmount());
         String reference = form.getPaymentReference().trim();
 
         ensureSaldoExists(apartment, period);
-        ensurePaymentDateInPeriod(paymentDate, period);
-        ensurePaymentUnique(apartment, period, paymentDate, amount, null);
+        ensurePaymentDateInPeriod(paymentTime.toLocalDate(), period);
+        ensurePaymentUnique(apartment, period, paymentTime, amount, null);
 
         Payment payment = new Payment();
         payment.setApartmentNumber(apartment);
         payment.setPeriod(period);
-        payment.setPaymentDate(paymentDate);
+        payment.setPaymentTime(paymentTime);
         payment.setAmount(amount);
         payment.setPaymentReference(reference);
 
@@ -171,17 +172,17 @@ public class LedgerService {
 
         Integer newApartment = form.getApartmentNumber();
         LocalDate newPeriod = parsePeriod(form.getPeriod());
-        LocalDate newPaymentDate = parseDate(form.getPaymentDate(), "дата платежа");
+        LocalDateTime newPaymentTime = parseDateTime(form.getPaymentTime(), "время платежа");
         BigDecimal newAmount = normalizePositive(form.getAmount());
         String newReference = form.getPaymentReference().trim();
 
         ensureSaldoExists(newApartment, newPeriod);
-        ensurePaymentDateInPeriod(newPaymentDate, newPeriod);
-        ensurePaymentUnique(newApartment, newPeriod, newPaymentDate, newAmount, id);
+        ensurePaymentDateInPeriod(newPaymentTime.toLocalDate(), newPeriod);
+        ensurePaymentUnique(newApartment, newPeriod, newPaymentTime, newAmount, id);
 
         payment.setApartmentNumber(newApartment);
         payment.setPeriod(newPeriod);
-        payment.setPaymentDate(newPaymentDate);
+        payment.setPaymentTime(newPaymentTime);
         payment.setAmount(newAmount);
         payment.setPaymentReference(newReference);
         saveSafely(payment, "Изменение создало бы дубликат платежа — операция отклонена.");
@@ -249,11 +250,11 @@ public class LedgerService {
         }
     }
 
-    private void ensurePaymentUnique(Integer apartment, LocalDate period, LocalDate paymentDate,
+    private void ensurePaymentUnique(Integer apartment, LocalDate period, LocalDateTime paymentTime,
                                      BigDecimal amount, Long excludeId) {
         boolean exists = excludeId == null
-                ? paymentRepository.existsByApartmentNumberAndPeriodAndPaymentDateAndAmount(apartment, period, paymentDate, amount)
-                : paymentRepository.existsByApartmentNumberAndPeriodAndPaymentDateAndAmountAndIdNot(apartment, period, paymentDate, amount, excludeId);
+                ? paymentRepository.existsByApartmentNumberAndPeriodAndPaymentTimeAndAmount(apartment, period, paymentTime, amount)
+                : paymentRepository.existsByApartmentNumberAndPeriodAndPaymentTimeAndAmountAndIdNot(apartment, period, paymentTime, amount, excludeId);
         if (exists) {
             throw new DuplicateRecordException("Такой платёж уже есть в базе. Новая запись отклонена.");
         }
@@ -297,17 +298,19 @@ public class LedgerService {
         }
     }
 
-    private LocalDate parseDate(String text, String label) {
+    private LocalDateTime parseDateTime(String text, String label) {
         try {
-            return LocalDate.parse(text);
+            // Формат input type="datetime-local": 2017-01-15T10:30 или 2017-01-15T10:30:00
+            return LocalDateTime.parse(text);
         } catch (RuntimeException ex) {
-            throw new IllegalArgumentException("Некорректная " + label + ".");
+            throw new IllegalArgumentException("Некорректное " + label +
+                    ". Ожидается время из выписки в формате ГГГГ-ММ-ДДЧЧ:ММ.");
         }
     }
 
     private void ensurePaymentDateInPeriod(LocalDate paymentDate, LocalDate period) {
         if (!YearMonth.from(paymentDate).atDay(1).equals(period)) {
-            throw new BalanceIntegrityException("Дата платежа должна находиться внутри указанного периода.");
+            throw new BalanceIntegrityException("Дата платежа из выписки должна находиться внутри указанного периода.");
         }
     }
 

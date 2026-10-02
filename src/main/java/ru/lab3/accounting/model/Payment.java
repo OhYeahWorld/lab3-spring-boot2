@@ -14,11 +14,12 @@ import jakarta.persistence.Version;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "payments", uniqueConstraints = @UniqueConstraint(
         name = "uq_payment_visible",
-        columnNames = {"apartment_number", "period", "payment_date", "amount"}))
+        columnNames = {"apartment_number", "period", "payment_time", "amount"}))
 public class Payment {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -30,8 +31,9 @@ public class Payment {
     @Column(name = "period", nullable = false)
     private LocalDate period;
 
-    @Column(name = "payment_date", nullable = false)
-    private LocalDate paymentDate;
+    // Время платежа из банковской выписки (дата и время списания средств).
+    @Column(name = "payment_time", nullable = false)
+    private LocalDateTime paymentTime;
 
     @Column(name = "amount", nullable = false, precision = 14, scale = 2)
     private BigDecimal amount;
@@ -66,8 +68,8 @@ public class Payment {
     public void setApartmentNumber(Integer apartmentNumber) { this.apartmentNumber = apartmentNumber; }
     public LocalDate getPeriod() { return period; }
     public void setPeriod(LocalDate period) { this.period = period; }
-    public LocalDate getPaymentDate() { return paymentDate; }
-    public void setPaymentDate(LocalDate paymentDate) { this.paymentDate = paymentDate; }
+    public LocalDateTime getPaymentTime() { return paymentTime; }
+    public void setPaymentTime(LocalDateTime paymentTime) { this.paymentTime = paymentTime; }
     public BigDecimal getAmount() { return amount; }
     public void setAmount(BigDecimal amount) { this.amount = amount; }
     public String getPaymentReference() { return paymentReference; }
