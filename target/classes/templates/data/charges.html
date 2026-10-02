@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Начисления')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <div class="page-title"><div><p class="eyebrow">Таблица charges</p><h1>Начисления по лицевому счету</h1></div></div>
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="card form-card">
+        <div class="card-head"><h2 th:text="${chargeForm.id == null ? 'Добавить начисление' : 'Изменить начисление'}">Добавить начисление</h2><span class="hint">Одинаковое начисление для квартиры и месяца повторно сохранить нельзя.</span></div>
+        <form th:action="@{/data/charges}" th:object="${chargeForm}" method="post" class="form-grid">
+            <input type="hidden" th:field="*{id}">
+            <label>Квартира
+                <input type="number" min="1" th:field="*{apartmentNumber}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('apartmentNumber')}" th:errors="*{apartmentNumber}"></small>
+            </label>
+            <label>Период
+                <input type="month" th:field="*{period}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('period')}" th:errors="*{period}"></small>
+            </label>
+            <label>Сумма
+                <input type="number" min="0.01" step="0.01" th:field="*{amount}" required>
+                <small class="field-error" th:if="${#fields.hasErrors('amount')}" th:errors="*{amount}"></small>
+            </label>
+            <label class="span-2">Описание
+                <input type="text" maxlength="255" th:field="*{description}" placeholder="Например: начисление за месяц">
+                <small class="field-error" th:if="${#fields.hasErrors('description')}" th:errors="*{description}"></small>
+            </label>
+            <button class="button primary" type="submit" th:text="${chargeForm.id == null ? 'Добавить' : 'Сохранить изменения'}">Добавить</button>
+            <a class="button ghost" th:if="${chargeForm.id != null}" th:href="@{/data/charges}">Отмена</a>
+        </form>
+    </section>
+
+    <section class="card">
+        <div class="card-head"><h2>История начислений</h2><span class="hint">После изменения сумма сальдо пересчитывается по цепочке.</span></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Квартира</th><th>Период</th><th>Сумма</th><th>Описание</th><th>Создано</th><th>Изменено</th><th></th></tr></thead>
+                <tbody>
+                <tr th:each="row : ${rows}">
+                    <td th:text="${row.apartmentNumber}">1</td>
+                    <td th:text="${#temporals.format(row.period, 'MM.yyyy')}">01.2017</td>
+                    <td class="money" th:text="${#numbers.formatDecimal(row.amount,1,2)}">0.00</td>
+                    <td th:text="${row.description}">Описание</td>
+                    <td th:text="${@timeFormat.format(row.createdAt)}">—</td>
+                    <td th:text="${@timeFormat.format(row.updatedAt)}">—</td>
+                    <td class="actions">
+                        <a class="table-link" th:href="@{/data/charges(edit=${row.id})}">Изменить</a>
+                        <form th:action="@{/data/charges/{id}/delete(id=${row.id})}" method="post" onsubmit="return confirm('Удалить начисление?');">
+                            <button class="table-link danger" type="submit">Удалить</button>
+                        </form>
+                    </td>
+                </tr>
+                <tr th:if="${#lists.isEmpty(rows)}"><td colspan="7" class="empty">Записей пока нет.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+</body>
+</html>

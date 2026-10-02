@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<body>
+<div th:fragment="messages" class="messages">
+    <div class="message success" th:if="${success}" th:text="${success}"></div>
+    <div class="message error" th:if="${error}" th:text="${error}"></div>
+</div>
+</body>
+</html>

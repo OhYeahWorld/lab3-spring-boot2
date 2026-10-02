@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Ошибка')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <section class="card error-card">
+        <p class="eyebrow">Ошибка приложения</p>
+        <h1>Не удалось выполнить операцию</h1>
+        <p class="subtle" th:text="${errorMessage}">Ошибка</p>
+        <a class="button primary" th:href="@{/}">Вернуться на главную</a>
+    </section>
+</main>
+</body>
+</html>
