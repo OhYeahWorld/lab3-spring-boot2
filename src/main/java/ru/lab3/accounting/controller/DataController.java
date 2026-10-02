@@ -22,7 +22,7 @@ import ru.lab3.accounting.service.LedgerService;
 
 import java.math.BigDecimal;
 import java.time.Clock;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.YearMonth;
 
 @Controller
@@ -142,7 +142,7 @@ public class DataController {
                 form.setId(p.getId());
                 form.setApartmentNumber(p.getApartmentNumber());
                 form.setPeriod(p.getPeriod().toString().substring(0, 7));
-                form.setPaymentDate(p.getPaymentDate().toString());
+                form.setPaymentTime(p.getPaymentTime().withNano(0).toString());
                 form.setAmount(p.getAmount());
                 form.setPaymentReference(p.getPaymentReference());
             }
@@ -150,8 +150,8 @@ public class DataController {
         if (form.getPeriod() == null) {
             form.setPeriod(YearMonth.now(clock).toString());
         }
-        if (form.getPaymentDate() == null) {
-            form.setPaymentDate(LocalDate.now(clock).toString());
+        if (form.getPaymentTime() == null) {
+            form.setPaymentTime(LocalDateTime.now(clock).withNano(0).toString());
         }
         if (!model.containsAttribute("paymentForm")) {
             model.addAttribute("paymentForm", form);

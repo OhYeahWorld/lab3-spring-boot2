@@ -31,15 +31,15 @@ CREATE TABLE IF NOT EXISTS payments (
     id BIGSERIAL PRIMARY KEY,
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
-    payment_date DATE NOT NULL,
+    payment_time TIMESTAMP NOT NULL,
     amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
     payment_reference VARCHAR(100) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     version BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT uq_payment_natural UNIQUE (apartment_number, period, payment_date, amount, payment_reference),
+    CONSTRAINT uq_payment_natural UNIQUE (apartment_number, period, payment_time, amount, payment_reference),
     CONSTRAINT chk_payment_date_in_period CHECK (
-        payment_date >= period AND payment_date < (period + INTERVAL '1 month')::date
+        payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
     )
 );
 
@@ -50,11 +50,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_charge_visible
     ON charges(apartment_number, period, amount);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_visible
-    ON payments(apartment_number, period, payment_date, amount);
+    ON payments(apartment_number, period, payment_time, amount);
 
 CREATE INDEX IF NOT EXISTS ix_saldo_apartment_period ON saldo(apartment_number, period);
 CREATE INDEX IF NOT EXISTS ix_charge_apartment_period ON charges(apartment_number, period);
 CREATE INDEX IF NOT EXISTS ix_payment_apartment_period ON payments(apartment_number, period);
+
+-- Миграция для баз, созданных до появления времени платежа:
+-- заменяем payment_date (DATE) на payment_time (TIMESTAMP).
+-- Время платежа берётся из выписки; старые даты переносятся с полуночи.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'payments' AND column_name = 'payment_date')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'payments' AND column_name = 'payment_time') THEN
+        ALTER TABLE payments DROP CONSTRAINT IF EXISTS chk_payment_date_in_period;
+        ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
+        DROP INDEX IF EXISTS uq_payment_visible;
+        UPDATE payments SET payment_date = payment_date + TIME '10:30';
+        ALTER TABLE payments RENAME COLUMN payment_date TO payment_time;
+        ALTER TABLE payments ALTER COLUMN payment_time TYPE TIMESTAMP USING payment_time::timestamp;
+        ALTER TABLE payments ADD CONSTRAINT uq_payment_natural
+            UNIQUE (apartment_number, period, payment_time, amount, payment_reference);
+        ALTER TABLE payments ADD CONSTRAINT chk_payment_date_in_period CHECK (
+            payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
+        );
+        CREATE UNIQUE INDEX uq_payment_visible
+            ON payments(apartment_number, period, payment_time, amount);
+    END IF;
+END $$;
 
 -- Системное время последнего изменения.
 CREATE OR REPLACE FUNCTION set_updated_at()
