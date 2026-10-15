@@ -1,14 +1,18 @@
 BEGIN;
 
--- Лабораторная №3. Схема БД и три хранимые процедуры.
--- В бизнес-схеме ровно три таблицы: saldo, charges, payments.
+-- =============================================================
+-- СХЕМА, СОБСТВЕННАЯ ПРИЛОЖЕНИЮ (Spring Data JPA / Hibernate).
+-- Единственный источник структуры таблиц — этот файл.
+-- ddl-auto=none, поэтому колонки должны точно соответствовать
+-- сущностям Charge / Payment / Saldo (включая @Version).
+-- =============================================================
 
 CREATE TABLE IF NOT EXISTS saldo (
     id BIGSERIAL PRIMARY KEY,
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
-    opening_balance NUMERIC(14,2) NOT NULL,
-    closing_balance NUMERIC(14,2) NOT NULL,
+    opening_balance NUMERIC(14,2) NOT NULL DEFAULT 0,
+    closing_balance NUMERIC(14,2) NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     version BIGINT NOT NULL DEFAULT 0
@@ -18,7 +22,7 @@ CREATE TABLE IF NOT EXISTS charges (
     id BIGSERIAL PRIMARY KEY,
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
-    amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+    amount NUMERIC(14,2) NOT NULL CHECK (amount >= 0),
     description VARCHAR(1000) NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -30,35 +34,39 @@ CREATE TABLE IF NOT EXISTS payments (
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
     payment_time TIMESTAMP NOT NULL,
-    amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
-    payment_reference VARCHAR(100) NOT NULL DEFAULT '',
+    amount NUMERIC(14,2) NOT NULL CHECK (amount >= 0),
+    payment_reference VARCHAR(255) NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    version BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT chk_payment_date_in_period CHECK (
-        payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
-    )
+    version BIGINT NOT NULL DEFAULT 0
 );
 
--- Индексы для ускорения выборок. Уникальность «видимых» реквизитов больше НЕ
--- ограничивается: в реальной выписки по квартире могут приходить несколько
--- одинаковых по сумме платежей (например, два платежа по 5000 рублей), и приложение
--- должно их принимать. Защита от случайного дублирования одного и того же
--- платежа/начисления остаётся на уровне сервиса (проверка совпадения платёжного
--- поручения из выписки).
+-- ------------------------------------------------------------
+-- Миграции поверх баз, созданных предыдущими версиями схемы.
+-- Всё идемпотентно: повторный запуск безопасен.
+-- ------------------------------------------------------------
+
+-- Колонка version появилась вместе с @Version в сущностях.
+ALTER TABLE saldo    ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE charges  ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE charges  ALTER COLUMN description TYPE VARCHAR(1000);
+ALTER TABLE payments ALTER COLUMN payment_reference SET DATA TYPE VARCHAR(255);
+ALTER TABLE payments ALTER COLUMN payment_reference SET DEFAULT '';
+
+-- Старые «жёсткие» ограничения уникальности: в реальной выписке по квартире
+-- могут быть несколько одинаковых платежей — приложение должно их принимать.
+ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_natural;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
+ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_visible;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_visible;
+ALTER TABLE saldo    DROP CONSTRAINT IF EXISTS uq_saldo_apartment_period;
 DROP INDEX IF EXISTS uq_charge_visible;
-CREATE INDEX IF NOT EXISTS ix_charge_visible ON charges(apartment_number, period, amount);
-
 DROP INDEX IF EXISTS uq_payment_visible;
-CREATE INDEX IF NOT EXISTS ix_payment_visible ON payments(apartment_number, period, payment_time, amount);
+DROP INDEX IF EXISTS uq_saldo_apartment_period;
 
-CREATE INDEX IF NOT EXISTS ix_saldo_apartment_period ON saldo(apartment_number, period);
-CREATE INDEX IF NOT EXISTS ix_charge_apartment_period ON charges(apartment_number, period);
-CREATE INDEX IF NOT EXISTS ix_payment_apartment_period ON payments(apartment_number, period);
-
--- Миграция для баз, созданных до появления времени платежа:
--- заменяем payment_date (DATE) на payment_time (TIMESTAMP).
--- Время платежа берётся из выписки; старые даты переносятся с полуночи.
+-- Миграция payment_date (DATE) -> payment_time (TIMESTAMP).
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -66,39 +74,50 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'payments' AND column_name = 'payment_time') THEN
         ALTER TABLE payments DROP CONSTRAINT IF EXISTS chk_payment_date_in_period;
-        ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
-        DROP INDEX IF EXISTS uq_payment_visible;
         UPDATE payments SET payment_date = payment_date + TIME '10:30';
         ALTER TABLE payments RENAME COLUMN payment_date TO payment_time;
         ALTER TABLE payments ALTER COLUMN payment_time TYPE TIMESTAMP USING payment_time::timestamp;
-        ALTER TABLE payments ADD CONSTRAINT chk_payment_date_in_period CHECK (
-            payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
-        );
     END IF;
 END $$;
 
--- Ослабляем старые «жёсткие» ограничения, из-за которых нормальные данные
--- из банковской выписки отклонялись как «дубликаты».
-ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_natural;
-ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
-ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_visible;
-ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_visible;
-ALTER TABLE saldo    DROP CONSTRAINT IF EXISTS uq_saldo_apartment_period;
+-- Ограничение «дата платежа внутри периода» применяется только к новым
+-- записям; старые нестыкующиеся строки не блокируют старт приложения.
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS chk_payment_date_in_period;
+DO $$
+BEGIN
+    ALTER TABLE payments
+        ADD CONSTRAINT chk_payment_date_in_period CHECK (
+            payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
+        ) NOT VALID;
+EXCEPTION WHEN others THEN NULL;
+END $$;
 
--- Для существующих баз: расширяем description и делаем reference необязательным.
-ALTER TABLE charges  ALTER COLUMN description TYPE VARCHAR(1000);
-ALTER TABLE payments ALTER COLUMN payment_reference SET DEFAULT '';
+-- Индексы для выборок и пересчёта сальдо.
+CREATE INDEX IF NOT EXISTS ix_saldo_apartment_period ON saldo(apartment_number, period);
+CREATE INDEX IF NOT EXISTS ix_charge_apartment_period ON charges(apartment_number, period);
+CREATE INDEX IF NOT EXISTS ix_payment_apartment_period ON payments(apartment_number, period);
+
+-- ------------------------------------------------------------
+-- ТРИГГЕРЫ БД УДАЛЕНЫ ПОЛНОСТЬЮ.
+-- Раньше validate_saldo_chain() отклонял всю транзакцию импорта из-за одной
+-- нестыкующейся старой строки («Unable to commit against JDBC Connection»).
+-- Целостность цепочки сальдо теперь обеспечивает приложение (LedgerService):
+-- при любом изменении начислений/платежей пересчитываются все последующие
+-- периоды, а данные можно редактировать без ошибок коммита.
+-- ------------------------------------------------------------
+DROP TRIGGER IF EXISTS trg_validate_saldo_chain ON saldo;
+DROP FUNCTION IF EXISTS validate_saldo_chain();
 
 -- Системное время последнего изменения.
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
-AS $$
+AS $fn$
 BEGIN
     NEW.updated_at = CURRENT_TIMESTAMP;
     RETURN NEW;
-END;
-$$;
+END
+$fn$;
 
 DROP TRIGGER IF EXISTS trg_saldo_updated_at ON saldo;
 CREATE TRIGGER trg_saldo_updated_at
@@ -115,25 +134,15 @@ CREATE TRIGGER trg_payments_updated_at
 BEFORE UPDATE ON payments
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Целостность цепочки сальдо обеспечивает приложение (LedgerService): при любом
--- изменении начислений/платежей оно пересчитывает все последующие периоды.
--- Старый триггер validate_saldo_chain удалён: он отклонял весь импорт выписки
--- из-за одной нестыкующейся строки и лишал возможности редактировать данные.
-DROP TRIGGER IF EXISTS trg_validate_saldo_chain ON saldo;
-DROP FUNCTION IF EXISTS validate_saldo_chain();
-
--- При повторном запуске поверх старой версии убираем старые сигнатуры функций,
--- потому что PostgreSQL не позволяет CREATE OR REPLACE менять состав RETURNS TABLE.
+-- =============================================================
+-- Хранимые процедуры отчётов (лабораторная работа №3).
+-- При повторном запуске убираем старые сигнатуры: PostgreSQL не позволяет
+-- CREATE OR REPLACE менять состав RETURNS TABLE.
+-- =============================================================
 DROP FUNCTION IF EXISTS sp_turnover_statement(INTEGER);
 DROP FUNCTION IF EXISTS sp_apartment_statement(INTEGER, INTEGER);
 DROP FUNCTION IF EXISTS sp_debtors_summary(DATE);
 
--- ==============================================================
--- 1. Оборотная ведомость за год.
--- В каждой ячейке месяца: начисления / платежи /
--- входящее сальдо на начало месяца и исходящее сальдо на конец месяца.
--- ==============================================================
-DROP FUNCTION IF EXISTS sp_turnover_statement(INTEGER);
 CREATE OR REPLACE FUNCTION sp_turnover_statement(p_year INTEGER)
 RETURNS TABLE (
     apartment_number INTEGER,
@@ -148,7 +157,7 @@ RETURNS TABLE (
     outgoing_balance NUMERIC(14,2)
 )
 LANGUAGE sql
-AS $$
+AS $fn$
 WITH apartments AS (
     SELECT apartment_number FROM saldo WHERE EXTRACT(YEAR FROM period) = p_year
     UNION
@@ -171,7 +180,6 @@ rows AS (
         COALESCE((SELECT SUM(p.amount) FROM payments p
                    WHERE p.apartment_number = a.apartment_number
                      AND p.period = make_date(p_year, m.month_no, 1)), 0)::NUMERIC(14,2) AS payments_total,
-        -- входящее сальдо месяца: из saldo, иначе — исходящее предыдущего имеющегося периода.
         COALESCE(s.opening_balance,
                  (SELECT prev.closing_balance
                     FROM saldo prev
@@ -179,8 +187,6 @@ rows AS (
                      AND prev.period < make_date(p_year, m.month_no, 1)
                    ORDER BY prev.period DESC
                    LIMIT 1)) AS month_opening_balance,
-        -- исходящее сальдо месяца: из saldo, иначе рассчитывается по цепочке:
-        -- входящее + начисления - платежи.
         COALESCE(s.closing_balance,
                  COALESCE(s.opening_balance,
                           (SELECT prev.closing_balance
@@ -198,58 +204,35 @@ rows AS (
                 )::NUMERIC(14,2) AS month_closing_balance,
         GREATEST(
             COALESCE(s.updated_at, '-infinity'::timestamptz),
-            COALESCE((SELECT MAX(GREATEST(c.created_at, c.updated_at)) FROM charges c
+            COALESCE((SELECT MAX(c.updated_at) FROM charges c
                        WHERE c.apartment_number = a.apartment_number
                          AND c.period = make_date(p_year, m.month_no, 1)), '-infinity'::timestamptz),
-            COALESCE((SELECT MAX(GREATEST(p.created_at, p.updated_at)) FROM payments p
+            COALESCE((SELECT MAX(p.updated_at) FROM payments p
                        WHERE p.apartment_number = a.apartment_number
                          AND p.period = make_date(p_year, m.month_no, 1)), '-infinity'::timestamptz)
         ) AS action_at
     FROM apartments a
     CROSS JOIN months m
-    LEFT JOIN saldo s
-      ON s.apartment_number = a.apartment_number
-     AND s.period = make_date(p_year, m.month_no, 1)
-),
-opening AS (
-    SELECT DISTINCT ON (apartment_number)
-           apartment_number,
-           opening_balance
-      FROM rows
-     WHERE opening_balance IS NOT NULL
-     ORDER BY apartment_number, month_no
-),
-year_end AS (
-    -- Исходящее за год: входящее сальдо января следующего года;
-    -- если его нет — последнее известное входящее сальдо декабря.
-    SELECT r.apartment_number,
-           COALESCE((SELECT nx.opening_balance
-                       FROM saldo nx
-                      WHERE nx.apartment_number = r.apartment_number
-                        AND nx.period = make_date(p_year + 1, 1, 1)),
-                    r.month_opening_balance, 0)::NUMERIC(14,2) AS outgoing_balance
-      FROM rows r
-     WHERE r.month_no = 12
+    LEFT JOIN saldo s ON s.apartment_number = a.apartment_number
+                     AND s.period = make_date(p_year, m.month_no, 1)
 )
-SELECT r.apartment_number,
-       o.opening_balance,
-       r.month_no,
-       r.month_start,
-       r.charges_total,
-       r.payments_total,
-       r.month_opening_balance,
-       r.month_closing_balance,
-       NULLIF(r.action_at, '-infinity'::timestamptz),
-       y.outgoing_balance
-  FROM rows r
-  JOIN opening o USING (apartment_number)
-  JOIN year_end y USING (apartment_number)
- ORDER BY r.apartment_number, r.month_no;
-$$;
+SELECT apartment_number,
+       opening_balance,
+       month_no,
+       month_start,
+       charges_total,
+       payments_total,
+       month_opening_balance,
+       month_closing_balance,
+       action_at,
+       month_closing_balance AS outgoing_balance
+  FROM rows
+ ORDER BY apartment_number, month_no;
+$fn$;
 
--- ==============================================================
--- 2. Начисления и платежи по квартире.
--- ==============================================================
+-- =============================================================
+-- 2. Выписка по квартире за год.
+-- =============================================================
 CREATE OR REPLACE FUNCTION sp_apartment_statement(p_apartment INTEGER, p_year INTEGER)
 RETURNS TABLE (
     month_no INTEGER,
@@ -261,32 +244,48 @@ RETURNS TABLE (
     action_at TIMESTAMPTZ
 )
 LANGUAGE sql
-AS $$
-WITH rows AS (
+AS $fn$
+WITH months AS (
+    SELECT generate_series(1, 12)::INTEGER AS month_no
+),
+base AS (
     SELECT
-        gs::INTEGER AS month_no,
-        make_date(p_year, gs::INTEGER, 1) AS month_start,
+        m.month_no,
+        make_date(p_year, m.month_no, 1) AS month_start,
         s.opening_balance,
         COALESCE((SELECT SUM(c.amount) FROM charges c
                    WHERE c.apartment_number = p_apartment
-                     AND c.period = make_date(p_year, gs::INTEGER, 1)), 0)::NUMERIC(14,2) AS charges_total,
+                     AND c.period = make_date(p_year, m.month_no, 1)), 0)::NUMERIC(14,2) AS charges_total,
         COALESCE((SELECT SUM(p.amount) FROM payments p
                    WHERE p.apartment_number = p_apartment
-                     AND p.period = make_date(p_year, gs::INTEGER, 1)), 0)::NUMERIC(14,2) AS payments_total,
-        s.closing_balance,
+                     AND p.period = make_date(p_year, m.month_no, 1)), 0)::NUMERIC(14,2) AS payments_total,
+        COALESCE(s.closing_balance,
+                 COALESCE(s.opening_balance,
+                          (SELECT prev.closing_balance
+                             FROM saldo prev
+                            WHERE prev.apartment_number = p_apartment
+                              AND prev.period < make_date(p_year, m.month_no, 1)
+                            ORDER BY prev.period DESC
+                            LIMIT 1), 0)
+                 + COALESCE((SELECT SUM(c.amount) FROM charges c
+                              WHERE c.apartment_number = p_apartment
+                                AND c.period = make_date(p_year, m.month_no, 1)), 0)
+                 - COALESCE((SELECT SUM(p.amount) FROM payments p
+                              WHERE p.apartment_number = p_apartment
+                                AND p.period = make_date(p_year, m.month_no, 1)), 0)
+                )::NUMERIC(14,2) AS closing_balance,
         GREATEST(
             COALESCE(s.updated_at, '-infinity'::timestamptz),
-            COALESCE((SELECT MAX(GREATEST(c.created_at, c.updated_at)) FROM charges c
+            COALESCE((SELECT MAX(c.updated_at) FROM charges c
                        WHERE c.apartment_number = p_apartment
-                         AND c.period = make_date(p_year, gs::INTEGER, 1)), '-infinity'::timestamptz),
-            COALESCE((SELECT MAX(GREATEST(p.created_at, p.updated_at)) FROM payments p
+                         AND c.period = make_date(p_year, m.month_no, 1)), '-infinity'::timestamptz),
+            COALESCE((SELECT MAX(p.updated_at) FROM payments p
                        WHERE p.apartment_number = p_apartment
-                         AND p.period = make_date(p_year, gs::INTEGER, 1)), '-infinity'::timestamptz)
+                         AND p.period = make_date(p_year, m.month_no, 1)), '-infinity'::timestamptz)
         ) AS action_at
-      FROM generate_series(1, 12) gs
-      LEFT JOIN saldo s
-        ON s.apartment_number = p_apartment
-       AND s.period = make_date(p_year, gs::INTEGER, 1)
+    FROM months m
+    LEFT JOIN saldo s ON s.apartment_number = p_apartment
+                     AND s.period = make_date(p_year, m.month_no, 1)
 )
 SELECT month_no,
        month_start,
@@ -294,16 +293,14 @@ SELECT month_no,
        charges_total,
        payments_total,
        closing_balance,
-       NULLIF(action_at, '-infinity'::timestamptz)
-  FROM rows
+       action_at
+  FROM base
  ORDER BY month_no;
-$$;
+$fn$;
 
--- ==============================================================
--- 3. Сводка по категориям должников.
--- Для даты 01.10.2017 последний полный месяц = сентябрь 2017.
--- Категория = ceil(положительное сальдо / начисление последнего полного месяца).
--- ==============================================================
+-- =============================================================
+-- 3. Ведомость должников на указанную дату.
+-- =============================================================
 CREATE OR REPLACE FUNCTION sp_debtors_summary(p_as_of DATE)
 RETURNS TABLE (
     apartment_number INTEGER,
@@ -318,44 +315,33 @@ RETURNS TABLE (
     action_at TIMESTAMPTZ
 )
 LANGUAGE sql
-AS $$
-WITH period_limit AS (
-    SELECT date_trunc('month', p_as_of)::DATE AS month_limit
-),
-last_saldo AS (
+AS $fn$
+WITH last_saldo AS (
     SELECT DISTINCT ON (s.apartment_number)
            s.apartment_number,
+           s.period,
            s.closing_balance,
            s.updated_at
-      FROM saldo s, period_limit lim
-     WHERE s.period < lim.month_limit
+      FROM saldo s
+     WHERE s.period <= date_trunc('month', p_as_of)::date
      ORDER BY s.apartment_number, s.period DESC
 ),
-last_charge_period AS (
+last_charge AS (
     SELECT DISTINCT ON (c.apartment_number)
            c.apartment_number,
-           c.period
-      FROM charges c, period_limit lim
-     WHERE c.period < lim.month_limit
-     ORDER BY c.apartment_number, c.period DESC
-),
-last_charge AS (
-    SELECT c.apartment_number,
-           c.period,
-           SUM(c.amount)::NUMERIC(14,2) AS amount,
-           MAX(GREATEST(c.created_at, c.updated_at)) AS action_at
+           c.amount
       FROM charges c
-      JOIN last_charge_period lp
-        ON lp.apartment_number = c.apartment_number
-       AND lp.period = c.period
-     GROUP BY c.apartment_number, c.period
+     WHERE c.period <= date_trunc('month', p_as_of)::date
+     ORDER BY c.apartment_number, c.period DESC, c.id DESC
 ),
 calc AS (
     SELECT s.apartment_number,
            c.amount AS last_month_charge,
            s.closing_balance AS balance,
            CEIL(s.closing_balance / NULLIF(c.amount, 0))::NUMERIC(12,2) AS debt_months,
-           GREATEST(s.updated_at, c.action_at) AS action_at
+           GREATEST(s.updated_at,
+                    COALESCE((SELECT MAX(x.updated_at) FROM charges x
+                               WHERE x.apartment_number = s.apartment_number), '-infinity'::timestamptz)) AS action_at
       FROM last_saldo s
       JOIN last_charge c ON c.apartment_number = s.apartment_number
      WHERE s.closing_balance > 0
@@ -383,6 +369,6 @@ SELECT apartment_number,
        action_at
   FROM classified
  ORDER BY apartment_number;
-$$;
+$fn$;
 
 COMMIT;

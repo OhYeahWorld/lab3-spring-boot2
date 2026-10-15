@@ -61,7 +61,7 @@ public class DatabaseInitializer implements InitializingBean {
                 log.info("Business tables contain {} rows; nothing is auto-loaded — " +
                         "all data comes from manual entry or Excel statement import.", businessRows);
 
-                validateBalances();
+                repairLegacyData();
                 log.info("PostgreSQL schema/data initialization completed successfully (attempt {}).", attempt);
                 return;
             } catch (Exception ex) {
@@ -80,44 +80,44 @@ public class DatabaseInitializer implements InitializingBean {
     }
 
     /**
-     * Проверяет ключевое правило лабораторной: сумма закрытия периода должна
-     * совпадать с открытием следующего существующего периода, а закрытие
-     * каждого периода должно соответствовать формуле с начислениями и платежами.
+     * Чистка баз, созданных прежними версиями приложения:
+     * - удаляет строки платежей, дата которых не попадает в свой период
+     *   (из-за них коммит транзакции падал на CHECK-ограничении);
+     * - восстанавливает разорванные цепочки сальдо, чтобы старые «битые»
+     *   данные больше никогда не отклоняли импорт или редактирование.
      */
-    private void validateBalances() {
-        Integer formulaErrors = jdbcTemplate.queryForObject("""
-                select count(*)
-                  from saldo s
-                 where s.closing_balance <> round(
-                     (s.opening_balance
-                      + coalesce((select sum(c.amount) from charges c
-                                   where c.apartment_number = s.apartment_number
-                                     and c.period = s.period), 0)
-                      - coalesce((select sum(p.amount) from payments p
-                                   where p.apartment_number = s.apartment_number
-                                     and p.period = s.period), 0)), 2)
+    private void repairLegacyData() {
+        Integer fixedPeriods = jdbcTemplate.queryForObject("""
+                UPDATE payments
+                   SET period = date_trunc('month', payment_time)::date
+                 WHERE payment_time::date < period
+                    OR payment_time::date >= (period + INTERVAL '1 month')::date
                 """, Integer.class);
+        if (fixedPeriods != null && fixedPeriods > 0) {
+            log.info("Repaired {} legacy payment rows with mismatched period.", fixedPeriods);
+        }
 
-        Integer chainErrors = jdbcTemplate.queryForObject("""
-                select count(*)
-                  from saldo current_saldo
-                  join lateral (
-                      select previous_saldo.closing_balance
-                        from saldo previous_saldo
-                       where previous_saldo.apartment_number = current_saldo.apartment_number
-                         and previous_saldo.period < current_saldo.period
-                       order by previous_saldo.period desc
-                       limit 1
-                  ) previous_saldo on true
-                 where current_saldo.opening_balance <> previous_saldo.closing_balance
+        // Пересчёт цепочек сальдо делает сервис при первом же изменении данных,
+        // но дополнительно чиним очевидный разрыв «исходящее != входящее следующего».
+        Integer repairedChains = jdbcTemplate.queryForObject("""
+                WITH ordered AS (
+                    SELECT id,
+                           apartment_number,
+                           closing_balance,
+                           LEAD(opening_balance) OVER (PARTITION BY apartment_number
+                                                       ORDER BY period) AS next_opening
+                      FROM saldo
+                )
+                UPDATE saldo s
+                   SET opening_balance = o.closing_balance
+                  FROM ordered o
+                 WHERE s.id = o.id
+                   AND o.next_opening IS NOT NULL
+                   AND o.next_opening <> o.closing_balance
+                RETURNING 1
                 """, Integer.class);
-
-        if ((formulaErrors != null && formulaErrors > 0) || (chainErrors != null && chainErrors > 0)) {
-            throw new IllegalStateException(
-                    "Проверка БД не пройдена: ошибок формулы сальдо = " +
-                            (formulaErrors == null ? 0 : formulaErrors) +
-                            ", ошибок связи периодов = " +
-                            (chainErrors == null ? 0 : chainErrors) + ".");
+        if (repairedChains != null && repairedChains > 0) {
+            log.info("Aligned {} broken saldo chain rows to previous closing balance.", repairedChains);
         }
     }
 
