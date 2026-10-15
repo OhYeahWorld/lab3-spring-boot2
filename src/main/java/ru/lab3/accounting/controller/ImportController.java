@@ -107,10 +107,9 @@ public class ImportController {
                          RedirectAttributes ra) {
         List<ParsedRowForm> safe = collectRows(request, session);
         if (safe.isEmpty()) {
-            // Форма пришла без строк и в сессии пусто — просим загрузить файл заново.
+            model.addAttribute("error", "Не удалось получить строки: загрузите файл выписки заново "
+                    + "(он больше не хранится в этой сессии).");
             model.addAttribute("parsedRows", List.of());
-            model.addAttribute("error", "Не удалось прочитать строки таблицы. "
-                    + "Проверьте данные и попробуйте ещё раз, либо загрузите файл заново.");
             return page(model);
         }
         try {
@@ -143,6 +142,17 @@ public class ImportController {
     private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
         List<ParsedRowForm> fromForm = readRowsFromRequest(request);
         if (!fromForm.isEmpty()) {
+            // страхуемся: обновляем сохранённый разбор правками из формы, чтобы следующий
+            // запрос (даже обрезанный Tomcat'ом) работал с актуальными данными
+            try {
+                List<StatementImportService.ImportRow> importRows = new ArrayList<>();
+                for (ParsedRowForm f : fromForm) {
+                    importRows.add(f.toRow());
+                }
+                rowsStore.save(session.getId(), resolveFileName(null, session), importRows);
+            } catch (RuntimeException ignored) {
+                // страховка не должна ломать основной сценарий
+            }
             return fromForm;
         }
         List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
