@@ -371,11 +371,15 @@ public class LedgerService {
             }
             previous = row;
         }
-        if (!changed.isEmpty()) {
+        for (Saldo row : changed) {
+            // Каждую строку сохраняем отдельно: конфликт версии одной записи
+            // не должен отменять пересчёт остальных периодов.
             try {
-                saldoRepository.saveAll(changed);
-            } catch (DataIntegrityViolationException ex) {
-                throw new BalanceIntegrityException("Нарушена последовательность сальдо при пересчёте.");
+                saveSafely(row, "Не удалось сохранить сальдо при пересчёте.");
+            } catch (DataIntegrityViolationException |
+                     org.springframework.orm.ObjectOptimisticLockingFailureException ex) {
+                throw new BalanceIntegrityException(
+                        "Нарушена последовательность сальдо для квартиры " + row.getApartmentNumber() + ".");
             }
         }
     }
@@ -517,6 +521,44 @@ public class LedgerService {
         return paymentTime.withYear(period.getYear()).withMonth(period.getMonthValue()).withDayOfMonth(day);
     }
 
+    /**
+     * Разбор даты в любом распространённом виде: 2018-01-15, 15.01.2018,
+     * 15/01/2018, 15 01 2018. День может отсутствовать — тогда берётся 1-е число.
+     */
+    public static LocalDate parseDateText(String text) {
+        if (text == null || text.isBlank()) {
+            throw new IllegalArgumentException("Укажите дату.");
+        }
+        String s = text.replace('\u00A0', ' ').trim();
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^(\\d{1,4})[.\\-/ ](\\d{1,2})(?:[.\\-/ ](\\d{1,4}))?(?:$|[ T].*$)").matcher(s);
+        if (!m.matches()) {
+            throw new IllegalArgumentException("Не удалось понять дату \"" + text
+                    + "\". Примеры: 2018-01-15, 15.01.2018.");
+        }
+        int a = Integer.parseInt(m.group(1));
+        int b = Integer.parseInt(m.group(2));
+        Integer c = m.group(3) == null ? null : Integer.parseInt(m.group(3));
+        int year, month, day;
+        if (a > 31) {            // 2018-01-15
+            year = a;
+            month = b;
+            day = c == null ? 1 : c;
+        } else if (c != null) {  // 15.01.2018 или 15/1/18
+            day = a;
+            month = b;
+            year = c < 100 ? 2000 + c : c;
+        } else {                 // только месяц и год: 01.2018
+            month = a;
+            year = b < 100 ? 2000 + b : b;
+            day = 1;
+        }
+        if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2200) {
+            throw new IllegalArgumentException("Некорректная дата \"" + text + "\".");
+        }
+        return LocalDate.of(year, month, Math.min(day, LocalDate.of(year, month, 1).lengthOfMonth()));
+    }
+
     /** Разбор строковой суммы формы ввода (поддерживает форматы выписки). */
     public static BigDecimal parseAmountText(String text) {
         if (text == null || text.isBlank()) {
@@ -557,9 +599,9 @@ public class LedgerService {
 
     private <T> T saveSafely(T entity, String message) {
         try {
-            if (entity instanceof Saldo s) return (T) saldoRepository.save(s);
-            if (entity instanceof Charge c) return (T) chargeRepository.save(c);
-            if (entity instanceof Payment p) return (T) paymentRepository.save(p);
+            if (entity instanceof Saldo s) return (T) saldoRepository.saveAndFlush(s);
+            if (entity instanceof Charge c) return (T) chargeRepository.saveAndFlush(c);
+            if (entity instanceof Payment p) return (T) paymentRepository.saveAndFlush(p);
             throw new IllegalArgumentException("Неподдерживаемый тип записи.");
         } catch (DataIntegrityViolationException ex) {
             throw new DuplicateRecordException(message);

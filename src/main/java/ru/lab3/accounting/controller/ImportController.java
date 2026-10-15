@@ -1,6 +1,5 @@
 package ru.lab3.accounting.controller;
 
-import jakarta.validation.Valid;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,7 +39,9 @@ public class ImportController {
     @PostMapping("/parse")
     public String parse(@RequestParam("file") MultipartFile file, Model model) {
         try {
-            List<StatementImportService.ImportRow> rows = importService.parse(file);
+            List<ParsedRowForm> rows = importService.parse(file).stream()
+                    .map(ParsedRowForm::from)
+                    .toList();
             model.addAttribute("parsedRows", rows);
             model.addAttribute("summary", summarize(rows));
             model.addAttribute("fileName", file.getOriginalFilename());
@@ -51,73 +52,101 @@ public class ImportController {
         return page(model);
     }
 
-    /** Правка строки предпросмотра прямо на сайте: квартира, сумма, тип, дата. */
+    /** Правка строк предпросмотра прямо на сайте — без импорта в базу. */
     @PostMapping("/edit")
-    public String edit(@Valid ParsedRowsHolder holder, Model model, RedirectAttributes ra) {
-        if (holder.getRows() == null || holder.getRows().isEmpty()) {
-            ra.addFlashAttribute("error", "Нет данных для редактирования — сначала загрузите файл.");
-            return "redirect:/data/import";
+    public String edit(@RequestParam(value = "rows", required = false) List<ParsedRowForm> rows,
+                       @RequestParam(value = "fileName", required = false) String fileName,
+                       Model model) {
+        List<ParsedRowForm> safe = clean(rows);
+        if (safe.isEmpty()) {
+            model.addAttribute("error", "Нет данных для редактирования — сначала загрузите файл.");
+            model.addAttribute("parsedRows", List.of());
+            return page(model);
         }
-        model.addAttribute("parsedRows", holder.toRows());
-        model.addAttribute("summary", summarize(holder.toRows()));
-        model.addAttribute("fileName", holder.getFileName());
+        model.addAttribute("parsedRows", safe);
+        model.addAttribute("summary", summarize(safe));
+        model.addAttribute("fileName", fileName == null ? "" : fileName);
+        model.addAttribute("notice", "Правки сохранены в таблице. Проверьте данные и нажмите «Импортировать в базу».");
         return page(model);
     }
 
     @PostMapping("/commit")
-    public String commit(@Valid ParsedRowsHolder holder, RedirectAttributes ra) {
-        if (holder.getRows() == null || holder.getRows().isEmpty()) {
+    public String commit(@RequestParam(value = "rows", required = false) List<ParsedRowForm> rows,
+                         RedirectAttributes ra) {
+        List<ParsedRowForm> safe = clean(rows);
+        if (safe.isEmpty()) {
             ra.addFlashAttribute("error", "Нет данных для импорта — сначала загрузите файл.");
             return "redirect:/data/import";
         }
         try {
-            StatementImportService.ImportResult result = importService.importRows(holder.toRows());
+            List<StatementImportService.ImportRow> importRows = new ArrayList<>();
+            for (ParsedRowForm f : safe) {
+                importRows.add(f.toRow());
+            }
+            StatementImportService.ImportResult result = importService.importRows(importRows);
             StringBuilder msg = new StringBuilder("Импорт завершён: платежей %d, начислений %d, сальдо %d."
                     .formatted(result.paymentsCreated(), result.chargesCreated(), result.saldoCreated()));
             if (!result.problems().isEmpty()) {
                 msg.append(" Пропущено строк: ").append(result.problems().size()).append('.');
+                ra.addFlashAttribute("error", "Пропущенные строки: "
+                        + String.join("; ", result.problems().subList(0, Math.min(20, result.problems().size()))));
             }
             ra.addFlashAttribute("success", msg.toString());
-            if (!result.problems().isEmpty()) {
-                ra.addFlashAttribute("error", "Пропущенные строки: " + String.join("; ", result.problems()));
-            }
         } catch (RuntimeException ex) {
             ra.addFlashAttribute("error", "Ошибка импорта: " + friendly(ex));
         }
         return "redirect:/data/import";
     }
 
-    // ==================== форма предпросмотра ====================
-
-    /** Хранит распознанные строки между запросами в скрытых полях формы. */
-    public static class ParsedRowsHolder {
-        private String fileName = "";
-        private List<ParsedRowForm> rows = new ArrayList<>();
-
-        public String getFileName() { return fileName; }
-        public void setFileName(String fileName) { this.fileName = fileName; }
-        public List<ParsedRowForm> getRows() { return rows; }
-        public void setRows(List<ParsedRowForm> rows) { this.rows = rows; }
-
-        List<StatementImportService.ImportRow> toRows() {
-            List<StatementImportService.ImportRow> result = new ArrayList<>();
-            for (ParsedRowForm f : rows) {
-                result.add(f.toRow());
-            }
+    private static List<ParsedRowForm> clean(List<ParsedRowForm> rows) {
+        List<ParsedRowForm> result = new ArrayList<>();
+        if (rows == null) {
             return result;
         }
+        int index = 0;
+        for (ParsedRowForm row : rows) {
+            if (row == null) {
+                continue;
+            }
+            if (row.getOrderNo() == null) {
+                row.setOrderNo(++index);
+            } else {
+                index = row.getOrderNo();
+            }
+            result.add(row);
+        }
+        return result;
     }
 
+    // ==================== форма предпросмотра ====================
+
+    /** Строка таблицы предпросмотра: все поля редактируются прямо на сайте. */
     public static class ParsedRowForm {
         private Integer orderNo;
-        private String date;
+        private String date = "";
         private String time = "";
         private String amount = "";
         private String party = "";
         private String purpose = "";
-        private Boolean incoming;
+        private String incoming = "";
         private String apartment = "";
         private String problem = "";
+
+        public static ParsedRowForm from(StatementImportService.ImportRow row) {
+            ParsedRowForm f = new ParsedRowForm();
+            f.orderNo = row.orderNo();
+            f.date = row.date() == null ? "" : row.date().toString();
+            f.time = row.executedAt() == null ? ""
+                    : String.format("%02d:%02d", row.executedAt().getHour(), row.executedAt().getMinute());
+            f.amount = row.amount() == null ? "" : row.amount().toPlainString();
+            f.party = row.party() == null ? "" : row.party();
+            f.purpose = row.purpose() == null ? "" : row.purpose();
+            f.incoming = row.problem() != null && row.date() == null && row.amount() == null
+                    ? "" : (row.incoming() ? "1" : "0");
+            f.apartment = row.apartment() == null ? "" : String.valueOf(row.apartment());
+            f.problem = row.problem() == null ? "" : row.problem();
+            return f;
+        }
 
         public Integer getOrderNo() { return orderNo; }
         public void setOrderNo(Integer orderNo) { this.orderNo = orderNo; }
@@ -131,8 +160,8 @@ public class ImportController {
         public void setParty(String party) { this.party = party; }
         public String getPurpose() { return purpose; }
         public void setPurpose(String purpose) { this.purpose = purpose; }
-        public Boolean getIncoming() { return incoming; }
-        public void setIncoming(Boolean incoming) { this.incoming = incoming; }
+        public String getIncoming() { return incoming; }
+        public void setIncoming(String incoming) { this.incoming = incoming; }
         public String getApartment() { return apartment; }
         public void setApartment(String apartment) { this.apartment = apartment; }
         public String getProblem() { return problem; }
@@ -143,31 +172,33 @@ public class ImportController {
             String dateProblem = null;
             if (date != null && !date.isBlank()) {
                 try {
-                    parsedDate = LocalDate.parse(date.trim());
+                    parsedDate = LedgerService.parseDateText(date);
                 } catch (RuntimeException ex) {
                     dateProblem = StatementImportService.PROBLEM_DATE;
                 }
             } else {
                 dateProblem = StatementImportService.PROBLEM_DATE;
             }
+
             BigDecimal parsedAmount = null;
             if (amount != null && !amount.isBlank()) {
                 try {
                     parsedAmount = LedgerService.parseAmountText(amount);
-                } catch (IllegalArgumentException ex) {
-                    // сумма не разобрана — ниже пометим проблемой
+                } catch (RuntimeException ex) {
+                    // сумма не разобрана — помечается проблемой ниже
                 }
             }
+
             Integer parsedApartment = null;
             if (apartment != null && !apartment.isBlank()) {
                 try {
                     parsedApartment = Integer.parseInt(apartment.trim());
                 } catch (NumberFormatException ex) {
-                    // некорректный номер — оставим null
+                    // некорректный номер — останется пустым
                 }
             }
-            boolean typeKnown = incoming != null;
-            String carriedProblem = (problem == null || problem.isBlank()) ? null : problem;
+
+            boolean typeKnown = "1".equals(incoming) || "0".equals(incoming);
 
             String effectiveProblem = null;
             if (dateProblem != null) {
@@ -178,13 +209,6 @@ public class ImportController {
                 effectiveProblem = StatementImportService.PROBLEM_TYPE;
             } else if (parsedApartment == null || parsedApartment <= 0) {
                 effectiveProblem = StatementImportService.PROBLEM_APARTMENT;
-            } else {
-                // Пользователь мог исправить проблему вручную; чужие проблемы сохраняем.
-                boolean wasFixable = StatementImportService.PROBLEM_APARTMENT.equals(carriedProblem)
-                        || StatementImportService.PROBLEM_AMOUNT.equals(carriedProblem);
-                if (carriedProblem != null && !wasFixable) {
-                    effectiveProblem = carriedProblem;
-                }
             }
 
             java.time.LocalDateTime executedAt = null;
@@ -195,7 +219,8 @@ public class ImportController {
                     try {
                         String hm = time.trim();
                         hour = Integer.parseInt(hm.substring(0, hm.indexOf(':')));
-                        minute = Integer.parseInt(hm.substring(hm.indexOf(':') + 1).replaceAll("\\D.*$", ""));
+                        String mm = hm.substring(hm.indexOf(':') + 1).replaceAll("\\D.*$", "");
+                        minute = mm.isEmpty() ? 0 : Integer.parseInt(mm);
                     } catch (RuntimeException ignored) {
                         hour = 0;
                         minute = 0;
@@ -203,19 +228,20 @@ public class ImportController {
                 }
                 executedAt = parsedDate.atTime(Math.min(hour, 23), Math.min(minute, 59));
             }
+
             return new StatementImportService.ImportRow(
                     orderNo == null ? 0 : orderNo, parsedDate, executedAt, parsedAmount,
                     party == null ? "" : party, purpose == null ? "" : purpose,
-                    Boolean.TRUE.equals(incoming), parsedApartment, effectiveProblem);
+                    "1".equals(incoming), parsedApartment, effectiveProblem);
         }
     }
 
     // ==================== вспомогательное ====================
 
-    private static String summarize(List<StatementImportService.ImportRow> rows) {
-        long payments = rows.stream().filter(r -> r.problem() == null && r.incoming()).count();
-        long charges = rows.stream().filter(r -> r.problem() == null && !r.incoming()).count();
-        long problems = rows.stream().filter(r -> r.problem() != null).count();
+    private static String summarize(List<ParsedRowForm> rows) {
+        long payments = rows.stream().filter(r -> "1".equals(r.getIncoming())).count();
+        long charges = rows.stream().filter(r -> "0".equals(r.getIncoming())).count();
+        long problems = rows.stream().filter(r -> r.getProblem() != null && !r.getProblem().isBlank()).count();
         return "Всего операций: %d · поступлений: %d · списаний: %d · требуют внимания: %d"
                 .formatted(rows.size(), payments, charges, problems);
     }
