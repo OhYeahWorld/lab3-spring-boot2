@@ -1,627 +1,688 @@
 package ru.lab3.accounting.service;
 
-import org.apache.poi.ooxml.util.SAXHelper;
-import org.apache.poi.openxml4j.exceptions.OpenXML4JException;
-import org.apache.poi.openxml4j.opc.OPCPackage;
-import org.apache.poi.ss.usermodel.DataFormatter;
-import org.apache.poi.xssf.eventusermodel.ReadOnlySharedStringsTable;
-import org.apache.poi.xssf.eventusermodel.XSSFReader;
-import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
-import org.apache.poi.xssf.model.StylesTable;
-import org.apache.poi.xssf.usermodel.XSSFComment;
-import org.springframework.dao.DataIntegrityViolationException;
+import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.xssf.usermodel.XSSFCell;
+import org.apache.poi.xssf.usermodel.XSSFRow;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
-import org.xml.sax.InputSource;
-import org.xml.sax.SAXException;
-import org.xml.sax.XMLReader;
 import ru.lab3.accounting.dto.ChargeForm;
 import ru.lab3.accounting.dto.PaymentForm;
-import ru.lab3.accounting.exception.DuplicateRecordException;
+import ru.lab3.accounting.repository.ChargeRepository;
+import ru.lab3.accounting.repository.PaymentRepository;
+import ru.lab3.accounting.repository.SaldoRepository;
 
-import javax.xml.parsers.ParserConfigurationException;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Загрузка операций из банковской выписки (Excel, формат «СберБизнес»).
+ * Разбор банковской выписки СберБизнес (.xlsx) и импорт операций в базу.
  *
- * Файл годовой выписки содержит два листа: короткий табличный список операций
- * («ВЫПИСКА ОПЕРАЦИЙ ПО ЛИЦЕВОМУ СЧЕТУ»: дата проводки, дебет/кредит, суммы,
- * № документа, назначение платежа) и большой постраничный лист с обрамлениями
- * платёжных поручений. Разбираются ОБА формата — выбирается тот лист, где
- * распознано больше операций. Из каждой операции берутся номер документа,
- * дата, сумма, тип (поступление/списание), контрагент, назначение платежа и,
- * по возможности, номер квартиры (из назначения вида «кв. 76», «л/с 105» или
- * из адреса плательщика). Поступления заносятся как платежи, списания — как
- * начисления. Если квартира не определена, операция относится на служебную
- * квартиру-«котёлку» (9000 + последние две цифры номера расчётного счёта):
- * такие строки видно в предпросмотре, их можно поправить перед импортом либо
- * отредактировать позже на страницах «Платежи» и «Начисления».
+ * Поддерживаются два представления файла:
+ *  1) Таблица операций (лист с колонками «Дата проводки / Дебет / Кредит /
+ *     Сумма по дебету / Сумма по кредиту / № документа / Назначение платежа») —
+ *     используется, если такой лист найден: он компактнее и однозначнее.
+ *  2) Печатные бланки платёжных поручений (лист «operations», где каждое
+ *     поручение занимает ~45 строк) — запасной вариант: блоки разделяются
+ *     заголовком «ПЛАТЕЖНОЕ ПОРУЧЕНИЕ № …» / «РЕКВИЗИТЫ № …».
+ *
+ * Тип операции определяется надёжно: у поступлений метка «Поступ. в банк
+ * плат.» стоит ниже «Списано со сч. плат.», у списаний — наоборот.
+ * Квартира извлекается из назначения платежа по всем распространённым
+ * форматам («л/с 164», «ЛС 49», «кв. 76», «квартира 12», «лиц. счет 88»),
+ * а также из адреса плательщика («… Д 12 К 2 КВ 164»).
+ *
+ * Любую распознанную строку можно исправить прямо на странице предпросмотра
+ * перед импортом: номер квартиры, сумму, тип операции, дату.
  */
 @Service
 public class StatementImportService {
 
-    /** Строка разобранной операции выписки (для предпросмотра и редактирования). */
-    public record ImportRow(String orderNo, LocalDate date, BigDecimal amount, String party,
-                            String purpose, boolean incoming, Integer apartment, String problem) {
-
-        public ImportRow withApartment(Integer newApartment) {
-            return new ImportRow(orderNo, date, amount, party, purpose, incoming, newApartment, problem);
-        }
-
-        public ImportRow withAmount(BigDecimal newAmount) {
-            return new ImportRow(orderNo, date, newAmount, party, purpose, incoming, apartment, problem);
-        }
-    }
-
-    public record ImportResult(int saldoCreated, int paymentsCreated, int chargesCreated,
-                               List<Integer> apartments, List<String> problems) {
-    }
-
-    private static final Pattern ORDER_PATTERN =
-            Pattern.compile("(?:ПЛАТЕЖНОЕ\\s+ПОРУЧЕНИЕ|РЕКВИЗИТЫ)\\s*№?\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
-    // Номер квартиры / лицевого счёта в назначении платежа.
-    private static final Pattern APARTMENT_PATTERN = Pattern.compile(
+    private static final Pattern DATE_TIME = Pattern.compile(
+            "^(\\d{4})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?");
+    private static final Pattern ORDER_NO = Pattern.compile(
+            "(?:ПЛАТЕЖНОЕ\\s+ПОРУЧЕНИЕ|РЕКВИЗИТЫ)\\s*№?\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
+    /** л/с, л.с, ЛС 123, «л с 164», кв., квартира 76, лиц. счет 88 — берётся последнее совпадение. */
+    private static final Pattern APARTMENT_HINT = Pattern.compile(
             "(?:кв(?:артир)?а?|л[./\\s-]?с[./\\sч]*|лиц[.\\s-]*(?:счет|счёт))[^0-9a-zа-я]{0,4}(\\d{1,4})",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    // Номер квартиры в адресной строке плательщика («…Д 12 К 2 КВ 164//»).
-    private static final Pattern KV_ADDRESS_PATTERN = Pattern.compile(
-            "\\bКВ\\.?\\s*(\\d{1,4})\\b", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS);
-    private static final Pattern DATE_IN_PURPOSE_PATTERN = Pattern.compile("(\\d{1,2})/(\\d{1,2})/(\\d{4})");
-    private static final DataFormatter FORMATTER = new DataFormatter(Locale.forLanguageTag("ru-RU"));
+    /** Адрес в строке контрагента: «… Д 12 К 2 КВ 164». */
+    private static final Pattern KV_ADDRESS = Pattern.compile(
+            "\\bКВ\\.?\\s*(\\d{1,4})\\b", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    public static final String PROBLEM_DATE = "не удалось определить дату операции";
+    public static final String PROBLEM_AMOUNT = "не удалось определить сумму";
+    public static final String PROBLEM_TYPE = "не удалось определить тип операции (поступление/списание)";
+    public static final String PROBLEM_APARTMENT = "не удалось определить номер квартиры";
 
     private final LedgerService ledgerService;
+    private final ChargeRepository chargeRepository;
+    private final PaymentRepository paymentRepository;
+    private final SaldoRepository saldoRepository;
 
-    public StatementImportService(LedgerService ledgerService) {
+    public StatementImportService(LedgerService ledgerService,
+                                  ChargeRepository chargeRepository,
+                                  PaymentRepository paymentRepository,
+                                  SaldoRepository saldoRepository) {
         this.ledgerService = ledgerService;
+        this.chargeRepository = chargeRepository;
+        this.paymentRepository = paymentRepository;
+        this.saldoRepository = saldoRepository;
     }
 
-    /** Импортирует уже разобранный (и, возможно, отредактированный) список операций. */
-    @Transactional
-    public ImportResult importRows(List<ImportRow> rows) {
-        if (rows.isEmpty()) {
-            throw new IllegalArgumentException("Нечего импортировать: список операций пуст.");
+    /** Одна операция выписки после разбора (или с описанием проблемы). */
+    public record ImportRow(int orderNo, LocalDate date, LocalDateTime executedAt, BigDecimal amount,
+                            String party, String purpose, boolean incoming, Integer apartment,
+                            String problem) {
+
+        public String timeText() {
+            if (executedAt == null) {
+                return "";
+            }
+            return "%02d:%02d".formatted(executedAt.getHour(), executedAt.getMinute());
         }
 
-        int saldoCreated = 0;
-        int paymentsCreated = 0;
-        int chargesCreated = 0;
-        List<String> problems = new ArrayList<>();
-        LinkedHashMap<Integer, Boolean> touchedApartments = new LinkedHashMap<>();
-
-        for (ImportRow row : rows) {
-            if (row.problem() != null) {
-                problems.add(label(row) + ": " + row.problem());
-                continue;
-            }
-            Integer apartment = row.apartment();
-            touchedApartments.put(apartment, true);
-            LocalDate period = row.date().withDayOfMonth(1);
-
-            try {
-                if (!ledgerService.saldoExists(apartment, period)) {
-                    ledgerService.ensureSaldoChain(apartment, period);
-                    saldoCreated++;
-                }
-                String reference = truncate("ПП №" + row.orderNo() + " от " + row.date(), 100);
-                if (row.incoming()) {
-                    PaymentForm form = new PaymentForm();
-                    form.setApartmentNumber(apartment);
-                    form.setPeriod(period.toString());
-                    form.setPaymentTime(row.date().atStartOfDay().toString());
-                    form.setAmount(row.amount().toPlainString());
-                    form.setPaymentReference(reference);
-                    ledgerService.createPayment(form);
-                    paymentsCreated++;
-                } else {
-                    ChargeForm form = new ChargeForm();
-                    form.setApartmentNumber(apartment);
-                    form.setPeriod(period.toString());
-                    form.setAmount(row.amount().toPlainString());
-                    form.setDescription(truncate(reference + ". " + buildDescription(row), 1000));
-                    ledgerService.createCharge(form);
-                    chargesCreated++;
-                }
-            } catch (DuplicateRecordException ex) {
-                problems.add(label(row) + ": " + ex.getMessage());
-            } catch (DataIntegrityViolationException ex) {
-                problems.add(label(row) + ": запись уже существует в базе.");
-            } catch (RuntimeException ex) {
-                problems.add(label(row) + ": " + messageOf(ex));
-            }
+        /** Копия с другой квартирой; проблема «нет номера квартиры» снимается. */
+        public ImportRow withApartment(Integer newApartment) {
+            String fixedProblem = PROBLEM_APARTMENT.equals(problem) && newApartment != null ? null : problem;
+            return new ImportRow(orderNo, date, executedAt, amount, party, purpose,
+                    incoming, newApartment, fixedProblem);
         }
 
-        return new ImportResult(saldoCreated, paymentsCreated, chargesCreated,
-                List.copyOf(touchedApartments.keySet()), problems);
+        /** Копия с другой суммой; проблема «нет суммы» снимается. */
+        public ImportRow withAmount(BigDecimal newAmount) {
+            String fixedProblem = PROBLEM_AMOUNT.equals(problem) && newAmount != null ? null : problem;
+            return new ImportRow(orderNo, date, executedAt, newAmount, party, purpose,
+                    incoming, apartment, fixedProblem);
+        }
+
+        /** Копия с другим типом операции. */
+        public ImportRow withIncoming(boolean newIncoming) {
+            return new ImportRow(orderNo, date, executedAt, amount, party, purpose,
+                    newIncoming, apartment, problem);
+        }
+
+        /** Копия с другой датой; проблема «нет даты» снимается. */
+        public ImportRow withDate(LocalDate newDate) {
+            String fixedProblem = PROBLEM_DATE.equals(problem) && newDate != null ? null : problem;
+            LocalDateTime newTime = newDate == null ? executedAt : newDate.atStartOfDay();
+            return new ImportRow(orderNo, newDate, newTime, amount, party, purpose,
+                    incoming, apartment, fixedProblem);
+        }
     }
 
-    /**
-     * Разбирает файл выписки на строки без записи в базу (для предпросмотра
-     * и редактирования). Используется потоковый (SAX) читатель POI: годовая
-     * выписка СберБизнес целиком в памяти обрушивала приложение (OutOfMemory).
-     */
+    /** Результат импорта: сколько записей создано и какие строки были пропущены. */
+    public record ImportResult(int paymentsCreated, int chargesCreated, int saldoCreated,
+                               List<String> problems, Set<Integer> apartments) {
+    }
+
+    // ==================== публичный разбор ====================
+
     public List<ImportRow> parse(MultipartFile file) throws IOException {
-        byte[] content = file.getBytes();
-        List<ImportRow> best = List.of();
-        try (OPCPackage pkg = OPCPackage.open(new ByteArrayInputStream(content))) {
-            XSSFReader reader = new XSSFReader(pkg);
-            ReadOnlySharedStringsTable strings = new ReadOnlySharedStringsTable(pkg);
-            StylesTable styles = reader.getStylesTable();
-            Iterator<InputStream> sheets = reader.getSheetsData();
-            while (sheets.hasNext()) {
-                List<String[]> grid = new ArrayList<>();
-                XMLReader parser = SAXHelper.newXMLReader();
-                parser.setContentHandler(new XSSFSheetXMLHandler(styles, null, strings,
-                        new GridCollector(grid), FORMATTER, false));
-                try (InputStream sheet = sheets.next()) {
-                    parser.parse(new InputSource(sheet));
-                }
-                List<ImportRow> tableRows = parseOperationTable(grid);
-                List<ImportRow> blockRows = parseBlocks(grid);
-                List<ImportRow> chosen = tableRows.size() >= blockRows.size() ? tableRows : blockRows;
-                if (chosen.size() > best.size()) {
-                    best = chosen;
-                }
+        try (InputStream input = file.getInputStream();
+             XSSFWorkbook workbook = new XSSFWorkbook(input)) {
+            List<ImportRow> tableRows = parseTableSheets(workbook);
+            if (!tableRows.isEmpty()) {
+                return tableRows;
             }
-        } catch (OpenXML4JException ex) {
-            throw new IllegalArgumentException(
-                    "Файл не является корректным Excel (.xlsx). Сохраните выписку в формате .xlsx и повторите загрузку.", ex);
-        } catch (SAXException ex) {
-            throw new IllegalArgumentException("Не удалось прочитать листы Excel-файла: " + messageOf(ex), ex);
-        } catch (ParserConfigurationException ex) {
-            throw new IllegalArgumentException("В среде запуска недоступен SAX-парсер XML: " + messageOf(ex), ex);
-        }
-
-        if (best.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "В файле не распознано ни одной операции. Проверьте, что это выписка СберБизнес в формате .xlsx "
-                            + "(лист с колонками «Дата проводки», «№ документа», «Назначение платежа» "
-                            + "или блоки «ПЛАТЕЖНОЕ ПОРУЧЕНИЕ № …»).");
-        }
-
-        // Убираем точные повторы внутри файла (один и тот же документ иногда попадает дважды).
-        List<ImportRow> unique = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (ImportRow r : best) {
-            String key = r.orderNo() + "|" + r.date() + "|" + r.amount() + "|" + r.incoming();
-            if (r.problem() == null && !seen.add(key)) {
-                continue;
+            List<ImportRow> blockRows = parseBlockSheets(workbook);
+            if (!blockRows.isEmpty()) {
+                return blockRows;
             }
-            unique.add(r);
+            throw new IllegalArgumentException(
+                    "в файле нет ни таблицы операций («Дата проводки / Сумма по дебету / Сумма по кредиту»), "
+                            + "ни блоков платёжных поручений («ПЛАТЕЖНОЕ ПОРУЧЕНИЕ № …»).");
+        } catch (IllegalStateException ex) {
+            throw new IllegalArgumentException("файл повреждён или не является документом Excel (.xlsx): "
+                    + Optional.ofNullable(ex.getMessage()).orElse("нет данных"), ex);
         }
-        return unique;
     }
 
-    // ============ табличный формат (лист «ВЫПИСКА ОПЕРАЦИЙ ПО ЛИЦЕВОМУ СЧЕТУ») ==========
+    // ==================== стратегия 1: таблица операций ====================
 
-    private List<ImportRow> parseOperationTable(List<String[]> grid) {
+    private List<ImportRow> parseTableSheets(XSSFWorkbook workbook) {
         List<ImportRow> rows = new ArrayList<>();
-        int headerRow = -1;
-        Map<String, Integer> cols = new HashMap<>();
-        for (int i = 0; i < Math.min(grid.size(), 40); i++) {
-            Map<String, Integer> found = new HashMap<>();
-            String[] row = grid.get(i);
-            for (int c = 0; c < row.length; c++) {
-                String v = row[c];
-                if (v == null) continue;
-                String t = v.trim().toLowerCase(Locale.ROOT);
-                if (t.startsWith("дата проводки")) found.putIfAbsent("date", c);
-                else if (t.equals("счет") || t.equals("счёт")) found.putIfAbsent("debitAccount", c);
-                else if (t.equals("кредит")) found.putIfAbsent("creditAccount", c);
-                else if (t.contains("по дебету")) found.putIfAbsent("debit", c);
-                else if (t.contains("по кредиту")) found.putIfAbsent("credit", c);
-                else if (t.contains("документа")) found.putIfAbsent("doc", c);
-                else if (t.contains("назначение платежа")) found.putIfAbsent("purpose", c);
-            }
-            if (found.containsKey("date") && found.containsKey("doc") && found.containsKey("purpose")) {
-                headerRow = i;
-                cols.putAll(found);
-                break;
-            }
-        }
-        if (headerRow < 0) return rows;
-        Integer debitAccCol = cols.get("debitAccount");
-        Integer creditAccCol = cols.getOrDefault("creditAccount", debitAccCol == null ? null : debitAccCol + 4);
-        Integer debitSumCol = cols.get("debit");
-        Integer creditSumCol = cols.get("credit");
-
-        // Наш расчётный счёт — самый частый 20-значный номер в столбцах счетов.
-        String ourAccount = detectOurAccount(grid, headerRow, debitAccCol, creditAccCol);
-        int fallbackApartment = fallbackApartment(ourAccount);
-
-        for (int i = headerRow + 1; i < grid.size(); i++) {
-            String dateText = cell(grid, i, cols.get("date"));
-            if (dateText == null || !isDateLike(dateText)) continue;
-            LocalDate date = parseDate(dateText);
-            String doc = trim(cell(grid, i, cols.get("doc")));
-            String purpose = trim(cell(grid, i, cols.get("purpose")));
-            String debitAcc = debitAccCol == null ? null : cell(grid, i, debitAccCol);
-            String creditAcc = creditAccCol == null ? null : cell(grid, i, creditAccCol);
-            BigDecimal debitSum = debitSumCol == null ? null : parseAmount(cell(grid, i, debitSumCol));
-            BigDecimal creditSum = creditSumCol == null ? null : parseAmount(cell(grid, i, creditSumCol));
-
-            BigDecimal amount;
-            boolean incoming;
-            if (creditSum != null && creditSum.signum() > 0) {
-                amount = creditSum;
-                incoming = true;
-            } else if (debitSum != null && debitSum.signum() > 0) {
-                amount = debitSum;
-                incoming = false;
-            } else {
-                rows.add(new ImportRow(doc, date, null, null, purpose, false, null,
-                        "не найдена сумма операции"));
+        for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
+            XSSFSheet sheet = workbook.getSheetAt(s);
+            TableLayout layout = findTableLayout(sheet);
+            if (layout == null) {
                 continue;
             }
-            if (date == null) {
-                rows.add(new ImportRow(doc, null, amount, null, purpose, incoming, null,
-                        "не найдена дата операции"));
-                continue;
-            }
-            if (ourAccount != null) {
-                incoming = containsDigits(creditAcc, ourAccount);
-            }
-
-            String party = cleanParty(incoming ? accountName(debitAcc) : accountName(creditAcc));
-            Integer apartment = extractApartment(purpose);
-            if (apartment == null) {
-                apartment = extractKvFromAddress(incoming ? debitAcc : creditAcc);
-            }
-            if (apartment == null) {
-                apartment = fallbackApartment;
-            }
-
-            rows.add(new ImportRow(doc, date, amount, party, stripPurposePrefix(purpose),
-                    incoming, apartment, null));
+            rows.addAll(readTableSheet(sheet, layout));
         }
         return rows;
     }
 
-    /** Наш счёт: 20-значный номер, встречающийся в большинстве строк таблицы. */
-    private String detectOurAccount(List<String[]> grid, int headerRow, Integer debitAccCol, Integer creditAccCol) {
-        Map<String, Integer> freq = new HashMap<>();
-        for (int i = headerRow + 1; i < grid.size(); i++) {
-            for (Integer col : new Integer[]{debitAccCol, creditAccCol}) {
-                String v = cell(grid, i, col);
-                if (v == null) continue;
-                Matcher m = Pattern.compile("\\d{20}").matcher(v);
-                while (m.find()) freq.merge(m.group(), 1, Integer::sum);
+    /** Колонки находим по подписям заголовков, а не по жёстким индексам. */
+    private record TableLayout(int headerRow, int dateCol, int debitAccCol, int creditAccCol,
+                               int debitSumCol, int creditSumCol, int docCol, int purposeCol) {
+    }
+
+    private TableLayout findTableLayout(XSSFSheet sheet) {
+        int lastScan = Math.min(sheet.getLastRowNum(), 40);
+        for (int r = sheet.getFirstRowNum(); r <= lastScan; r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
             }
-        }
-        return freq.entrySet().stream()
-                .max(Comparator.comparingInt(Map.Entry::getValue))
-                .map(Map.Entry::getKey)
-                .orElse(null);
-    }
-
-    /** Служебная квартира для операций без распознанного номера. */
-    private static int fallbackApartment(String ourAccount) {
-        if (ourAccount != null && ourAccount.length() >= 2 && ourAccount.matches("\\d+")) {
-            return 9000 + Integer.parseInt(ourAccount.substring(ourAccount.length() - 2));
-        }
-        return 9999;
-    }
-
-    private static boolean containsDigits(String cellValue, String digits) {
-        return cellValue != null && cellValue.replaceAll("\\D", "").contains(digits);
-    }
-
-    /** Имя владельца счёта из многострочной ячейки «Счет» (последняя текстовая строка). */
-    private static String accountName(String accountCell) {
-        if (accountCell == null) return null;
-        String[] parts = accountCell.split("\\R");
-        for (int k = parts.length - 1; k >= 0; k--) {
-            String p = parts[k].trim();
-            if (!p.isEmpty() && !p.matches("\\d+")) return p;
+            int dateCol = -1;
+            int debitSumCol = -1;
+            int creditSumCol = -1;
+            int docCol = -1;
+            int purposeCol = -1;
+            for (int c = row.getFirstCellNum(); c < row.getLastCellNum(); c++) {
+                String text = cellText(row, c);
+                if (text == null) {
+                    continue;
+                }
+                String t = text.toLowerCase(Locale.ROOT);
+                if (dateCol < 0 && (t.startsWith("дата проводки") || t.equals("дата"))) {
+                    dateCol = c;
+                } else if (debitSumCol < 0 && t.contains("по дебету")) {
+                    debitSumCol = c;
+                } else if (creditSumCol < 0 && t.contains("по кредиту")) {
+                    creditSumCol = c;
+                } else if (docCol < 0 && (t.startsWith("№ документа") || t.startsWith("no документа"))) {
+                    docCol = c;
+                } else if (purposeCol < 0 && t.startsWith("назначение")) {
+                    purposeCol = c;
+                }
+            }
+            if (dateCol >= 0 && (debitSumCol >= 0 || creditSumCol >= 0)) {
+                int debitAccCol = findAccountColumn(sheet, r, debitSumCol);
+                int creditAccCol = findAccountColumn(sheet, r, creditSumCol);
+                return new TableLayout(r, dateCol, debitAccCol, creditAccCol,
+                        debitSumCol, creditSumCol, docCol, purposeCol);
+            }
         }
         return null;
     }
 
-    private static String cleanParty(String name) {
-        return name == null ? null : truncate(name.trim(), 300);
+    /** Ищем подпись «Дебет»/«Кредит» чуть выше колонки суммы — это колонка счетов. */
+    private int findAccountColumn(XSSFSheet sheet, int headerRow, int sumCol) {
+        if (sumCol < 0) {
+            return -1;
+        }
+        for (int r = Math.max(sheet.getFirstRowNum(), headerRow - 2); r <= headerRow; r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
+            }
+            for (int c = Math.max(0, sumCol - 4); c <= sumCol; c++) {
+                String t = cellText(row, c);
+                if (t != null) {
+                    String tl = t.toLowerCase(Locale.ROOT);
+                    if (tl.equals("дебет") || tl.equals("кредит")) {
+                        return c;
+                    }
+                }
+            }
+        }
+        return Math.max(0, sumCol - 1);
     }
 
-    private static String stripPurposePrefix(String purpose) {
-        if (purpose == null) return null;
-        return purpose.replaceFirst("(?i)^Дата оплаты\\s+[\\d/]+\\s*,\\s*(сумма\\s*[\\d.,]+\\s*,?)?", "").trim();
+    private List<ImportRow> readTableSheet(XSSFSheet sheet, TableLayout layout) {
+        List<ImportRow> rows = new ArrayList<>();
+        int order = 0;
+        for (int r = layout.headerRow() + 1; r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
+            }
+            DateParts dp = parseDate(cellText(row, layout.dateCol()));
+            if (dp == null) {
+                continue; // служебные/пустые строки между блоками
+            }
+            BigDecimal debitSum = parseAmount(cellText(row, layout.debitSumCol()));
+            BigDecimal creditSum = parseAmount(cellText(row, layout.creditSumCol()));
+            boolean incoming = creditSum != null && creditSum.signum() > 0;
+            BigDecimal amount = incoming ? creditSum : debitSum;
+            String purpose = trimToEmpty(cellText(row, layout.purposeCol()));
+            String accountSide = layout.debitAccCol() >= 0 || layout.creditAccCol() >= 0
+                    ? trimToEmpty(cellText(row, incoming ? layout.debitAccCol() : layout.creditAccCol()))
+                    : "";
+            Integer apartment = extractApartment(purpose, accountSide);
+
+            String problem = null;
+            if (amount == null || amount.signum() <= 0) {
+                problem = PROBLEM_AMOUNT;
+            } else if (apartment == null) {
+                problem = PROBLEM_APARTMENT;
+            }
+            rows.add(new ImportRow(++order, dp.date(), dp.time(), amount,
+                    shortParty(accountSide), purpose, incoming, apartment, problem));
+        }
+        return rows;
     }
 
-    private static Integer extractKvFromAddress(String accountCell) {
-        if (accountCell == null) return null;
-        Matcher m = KV_ADDRESS_PATTERN.matcher(accountCell);
+    // ==================== стратегия 2: блоки поручений ====================
+
+    private List<ImportRow> parseBlockSheets(XSSFWorkbook workbook) {
+        List<ImportRow> rows = new ArrayList<>();
+        int order = 0;
+        for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
+            XSSFSheet sheet = workbook.getSheetAt(s);
+            List<Integer> starts = blockStarts(sheet);
+            if (starts.size() < 3) {
+                continue; // это не лист с поручениями
+            }
+            for (int bi = 0; bi < starts.size(); bi++) {
+                int start = starts.get(bi);
+                int end = (bi + 1 < starts.size()) ? starts.get(bi + 1) : sheet.getLastRowNum() + 1;
+                BlockData data = readBlock(sheet, start, end, bi > 0 ? starts.get(bi - 1) : -1);
+                Integer apartment = extractApartment(data.purpose(), data.party());
+                String problem = null;
+                if (data.date() == null) {
+                    problem = PROBLEM_DATE;
+                } else if (data.amount() == null || data.amount().signum() <= 0) {
+                    problem = PROBLEM_AMOUNT;
+                } else if (data.incoming() == null) {
+                    problem = PROBLEM_TYPE;
+                } else if (apartment == null) {
+                    problem = PROBLEM_APARTMENT;
+                }
+                rows.add(new ImportRow(++order, data.date(), data.executedAt(), data.amount(),
+                        data.party(), data.purpose(), Boolean.TRUE.equals(data.incoming()),
+                        apartment, problem));
+            }
+        }
+        return rows;
+    }
+
+    private List<Integer> blockStarts(XSSFSheet sheet) {
+        List<Integer> starts = new ArrayList<>();
+        for (int r = sheet.getFirstRowNum(); r <= sheet.getLastRowNum(); r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
+            }
+            for (int c = Math.max(row.getFirstCellNum(), 0); c < Math.min(row.getLastCellNum(), 6); c++) {
+                String text = cellText(row, c);
+                if (text != null && ORDER_NO.matcher(text).find()) {
+                    starts.add(r);
+                    break;
+                }
+            }
+        }
+        return starts;
+    }
+
+    private record BlockData(LocalDate date, LocalDateTime executedAt, BigDecimal amount,
+                             Boolean incoming, String party, String purpose) {
+    }
+
+    private BlockData readBlock(XSSFSheet sheet, int start, int end, int prevStart) {
+        LocalDate opDate = null;
+        LocalDateTime opTime = null;
+        int postLabelRow = -1;
+        int writtenOffLabelRow = -1;
+
+        // Шапка блока — между концом предыдущего блока и началом этого.
+        int windowFrom = Math.max(sheet.getFirstRowNum(), prevStart + 1);
+        for (int r = start - 1; r >= windowFrom; r--) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
+            }
+            for (int c = Math.max(row.getFirstCellNum(), 0); c < row.getLastCellNum(); c++) {
+                String t = cellText(row, c);
+                if (t == null) {
+                    continue;
+                }
+                String tl = t.toLowerCase(Locale.ROOT);
+                if (postLabelRow < 0 && tl.startsWith("поступ")) {
+                    postLabelRow = r;
+                }
+                if (writtenOffLabelRow < 0 && tl.startsWith("списано со")) {
+                    writtenOffLabelRow = r;
+                }
+            }
+            if (opDate == null) {
+                DateParts dp = parseDateAnyCell(row);
+                if (dp != null) {
+                    opDate = dp.date();
+                    opTime = dp.time();
+                }
+            }
+            if (postLabelRow >= 0 && writtenOffLabelRow >= 0 && opDate != null) {
+                break;
+            }
+        }
+        Boolean incoming = null;
+        if (postLabelRow >= 0 && writtenOffLabelRow >= 0) {
+            // У поступления метка «Поступ. в банк плат.» стоит НИЖЕ «Списано со сч. плат.»
+            incoming = postLabelRow > writtenOffLabelRow;
+        }
+
+        BigDecimal amount = null;
+        String payer = null;
+        String payee = null;
+        String purpose = null;
+        for (int r = start; r < end; r++) {
+            XSSFRow row = sheet.getRow(r);
+            if (row == null) {
+                continue;
+            }
+            String first = cellText(row, 1);
+            String labelZ = cellText(row, 25);
+            String value29 = cellText(row, 29);
+
+            if (amount == null && labelZ != null && labelZ.equalsIgnoreCase("сумма")) {
+                amount = parseAmount(value29);
+            }
+            if (first != null) {
+                String fl = first.toLowerCase(Locale.ROOT);
+                if (fl.equals("плательщик") && payer == null) {
+                    payer = nearestNameAbove(sheet, r, start);
+                } else if (fl.equals("получатель") && payee == null) {
+                    payee = nearestNameBelow(sheet, r, end);
+                } else if (purpose == null && fl.contains("назначение платеж") && fl.length() > 25) {
+                    purpose = stripPurposePrefix(first);
+                }
+            }
+        }
+        if (purpose == null) {
+            purpose = "";
+        }
+        String party = Boolean.TRUE.equals(incoming) ? payer : payee;
+        LocalDateTime executedAt = opDate == null ? null
+                : opDate.atTime(opTime == null ? 0 : opTime.getHour(),
+                        opTime == null ? 0 : opTime.getMinute(),
+                        opTime == null ? 0 : opTime.getSecond());
+        return new BlockData(opDate, executedAt, amount, incoming,
+                party == null ? "" : shortParty(party), purpose);
+    }
+
+    private DateParts parseDateAnyCell(XSSFRow row) {
+        for (int c = Math.max(row.getFirstCellNum(), 0); c < Math.min(row.getLastCellNum(), 24); c++) {
+            DateParts dp = parseDate(cellText(row, c));
+            if (dp != null) {
+                return dp;
+            }
+        }
+        return null;
+    }
+
+    private String nearestNameAbove(XSSFSheet sheet, int labelRow, int fromRow) {
+        for (int r = labelRow - 1; r >= Math.max(fromRow, labelRow - 4); r--) {
+            String t = cellText(sheet.getRow(r), 1);
+            if (isName(t)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    private String nearestNameBelow(XSSFSheet sheet, int labelRow, int toRow) {
+        for (int r = labelRow + 1; r < Math.min(toRow, labelRow + 3); r++) {
+            String t = cellText(sheet.getRow(r), 1);
+            if (isName(t)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    private boolean isName(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.trim();
+        if (t.matches("[\\d\\s./:-]+")) {
+            return false; // только цифры/разделители — это даты или счета
+        }
+        String tl = t.toLowerCase(Locale.ROOT);
+        return !tl.startsWith("бик") && !tl.startsWith("сч") && !tl.startsWith("банк ");
+    }
+
+    private String stripPurposePrefix(String text) {
+        return text.replaceFirst("(?i)^.*назначение\\s+платежа\\s*:?", "").trim();
+    }
+
+    // ==================== общие утилиты ====================
+
+    private record DateParts(LocalDate date, LocalDateTime time) {
+    }
+
+    private DateParts parseDate(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        Matcher m = DATE_TIME.matcher(text.trim());
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            LocalDate date = LocalDate.of(Integer.parseInt(m.group(1)),
+                    Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
+            int hour = m.group(4) == null ? 0 : Integer.parseInt(m.group(4));
+            int minute = m.group(5) == null ? 0 : Integer.parseInt(m.group(5));
+            int second = m.group(6) == null ? 0 : Integer.parseInt(m.group(6));
+            return new DateParts(date, date.atTime(hour, minute, second));
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    /** Номер квартиры из назначения платежа (последнее упоминание) или из адреса «КВ N». */
+    private Integer extractApartment(String purpose, String fallbackText) {
+        Integer fromPurpose = lastApartmentMatch(purpose);
+        if (fromPurpose != null) {
+            return fromPurpose;
+        }
+        Integer fromAddress = lastKvAddressMatch(fallbackText);
+        if (fromAddress != null) {
+            return fromAddress;
+        }
+        return lastApartmentMatch(fallbackText);
+    }
+
+    private Integer lastApartmentMatch(String text) {
+        if (text == null) {
+            return null;
+        }
         Integer last = null;
+        Matcher m = APARTMENT_HINT.matcher(text);
         while (m.find()) {
-            try {
-                int v = Integer.parseInt(m.group(1));
-                if (v > 0 && v < 1000) last = v;
-            } catch (NumberFormatException ignored) { }
+            int value = Integer.parseInt(m.group(1));
+            if (value > 0 && value < 1000) {
+                last = value;
+            }
         }
         return last;
     }
 
-    // ================= блочный формат («ПЛАТЕЖНОЕ ПОРУЧЕНИЕ № …») =====================
-
-    private List<ImportRow> parseBlocks(List<String[]> grid) {
-        List<ImportRow> rows = new ArrayList<>();
-        String ourAccount = detectMostFrequentAccountInColumn(grid, 29);
-        int fallbackApartment = fallbackApartment(ourAccount);
-
-        for (int i = 0; i < grid.size(); i++) {
-            String orderLabel = cell(grid, i, 1);
-            if (orderLabel == null) continue;
-            Matcher om = ORDER_PATTERN.matcher(orderLabel);
-            if (!om.find()) continue;
-            String orderNo = om.group(1);
-
-            int end = i + 1;
-            while (end < grid.size()) {
-                String label = cell(grid, end, 1);
-                if (label != null && ORDER_PATTERN.matcher(label).find()) break;
-                if (label != null && label.trim().toUpperCase(Locale.ROOT).startsWith("ИСПОЛНЕНО")) break;
-                end++;
+    private Integer lastKvAddressMatch(String text) {
+        if (text == null) {
+            return null;
+        }
+        Integer last = null;
+        Matcher m = KV_ADDRESS.matcher(text);
+        while (m.find()) {
+            int value = Integer.parseInt(m.group(1));
+            if (value > 0 && value < 1000) {
+                last = value;
             }
+        }
+        return last;
+    }
 
-            LocalDate opDate = null;
-            BigDecimal amount = null;
-            boolean incoming = false, outgoing = false;
-            String payer = null, payee = null, purpose = null;
-
-            // Дата операции — в шапке над блоком (одинаковая дата в B- и R-колонках).
-            for (int j = Math.max(0, i - 9); j < i; j++) {
-                String b = cell(grid, j, 1);
-                String r = cell(grid, j, 17);
-                if (b != null && r != null && isDateLike(b) && isDateLike(r)) {
-                    opDate = parseDate(b);
-                    if (opDate == null) opDate = parseDate(r);
-                    break;
-                }
+    /** Человекочитаемое имя контрагента: первая текстовая строка ячейки реквизитов. */
+    private String shortParty(String accountCell) {
+        if (accountCell == null || accountCell.isBlank()) {
+            return "";
+        }
+        for (String line : accountCell.split("\\R")) {
+            String t = line.trim();
+            if (t.isEmpty() || t.matches("[\\d\\s./-]+")
+                    || t.toUpperCase(Locale.ROOT).startsWith("БИК")) {
+                continue;
             }
+            return t.length() > 120 ? t.substring(0, 120) : t;
+        }
+        return "";
+    }
 
-            for (int j = i; j < end; j++) {
-                String b = cell(grid, j, 1);
-                String z = cell(grid, j, 25);
-                String ad = cell(grid, j, 29);
-                if (z != null) {
-                    String t = z.trim();
-                    if (t.equals("Сумма") && amount == null) {
-                        amount = parseAmount(ad);
-                    } else if (t.startsWith("Сч. №") && ad != null && ourAccount != null
-                            && ad.replaceAll("\\s", "").equals(ourAccount)) {
-                        if (sideLabelIsPayer(grid, j, i)) incoming = true; else outgoing = true;
+    private BigDecimal parseAmount(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return LedgerService.parseAmountText(text);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
+    }
+
+    private String cellText(XSSFRow row, int index) {
+        if (row == null || index < 0 || index >= row.getLastCellNum()) {
+            return null;
+        }
+        XSSFCell cell = row.getCell(index);
+        if (cell == null) {
+            return null;
+        }
+        return switch (cell.getCellType()) {
+            case STRING -> cell.getStringCellValue().trim();
+            case FORMULA -> formulaText(cell);
+            case NUMERIC -> numericText(cell);
+            case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
+            default -> null;
+        };
+    }
+
+    private String formulaText(XSSFCell cell) {
+        try {
+            return cell.getStringCellValue().trim();
+        } catch (IllegalStateException ex) {
+            try {
+                return numericTextOf(cell.getNumericCellValue());
+            } catch (RuntimeException nested) {
+                return null;
+            }
+        }
+    }
+
+    private String numericText(XSSFCell cell) {
+        if (DateUtil.isCellDateFormatted(cell)) {
+            LocalDateTime dt = cell.getLocalDateTimeCellValue();
+            return "%04d-%02d-%02d %02d:%02d:%02d".formatted(
+                    dt.getYear(), dt.getMonthValue(), dt.getDayOfMonth(),
+                    dt.getHour(), dt.getMinute(), dt.getSecond());
+        }
+        return numericTextOf(cell.getNumericCellValue());
+    }
+
+    private String numericTextOf(double value) {
+        if (Math.abs(value - Math.rint(value)) < 1e-9) {
+            return String.valueOf((long) value);
+        }
+        return BigDecimal.valueOf(value).toPlainString();
+    }
+
+    private String trimToEmpty(String text) {
+        return text == null ? "" : text;
+    }
+
+    // ==================== импорт ====================
+
+    @org.springframework.transaction.annotation.Transactional
+    public ImportResult importRows(List<ImportRow> rows) {
+        int payments = 0;
+        int charges = 0;
+        long before = saldoRepository.count();
+        List<String> problems = new ArrayList<>();
+        Set<Integer> touchedApartments = new LinkedHashSet<>();
+
+        for (ImportRow row : rows) {
+            if (row.problem() != null) {
+                problems.add("строка №" + row.orderNo() + ": " + row.problem());
+                continue;
+            }
+            try {
+                if (row.incoming()) {
+                    PaymentForm form = new PaymentForm();
+                    form.setApartmentNumber(row.apartment());
+                    form.setPeriod(YearMonth.from(row.date()).toString());
+                    form.setPaymentTime(executedAtText(row));
+                    form.setAmount(row.amount().toPlainString());
+                    form.setPaymentReference("выписка-" + row.orderNo());
+                    if (!paymentExists(row)) {
+                        ledgerService.createPayment(form);
+                        payments++;
+                    }
+                } else {
+                    ChargeForm form = new ChargeForm();
+                    form.setApartmentNumber(row.apartment());
+                    form.setPeriod(YearMonth.from(row.date()).toString());
+                    form.setAmount(row.amount().toPlainString());
+                    form.setDescription(buildChargeDescription(row));
+                    if (!chargeExists(row)) {
+                        ledgerService.createCharge(form);
+                        charges++;
                     }
                 }
-                if (b != null) {
-                    String t = b.trim();
-                    if (t.equals("Плательщик") && payer == null) payer = partyNameAbove(grid, j, i);
-                    if (t.equals("Получатель") && payee == null) payee = partyNameAbove(grid, j, i);
-                    if (purpose == null && t.contains("Назначение") && !t.equalsIgnoreCase("Назначение платежа")) {
-                        purpose = t.replaceFirst("(?i)^.*Назначение\\s+платежа\\s*:?\\s*", "").trim();
-                    }
-                }
+                touchedApartments.add(row.apartment());
+            } catch (RuntimeException ex) {
+                problems.add("строка №" + row.orderNo() + ": "
+                        + Optional.ofNullable(ex.getMessage()).orElse("ошибка сохранения"));
             }
-
-            Integer apartment = purpose == null ? null : extractApartment(purpose);
-            if (opDate == null && purpose != null) {
-                Matcher dm = DATE_IN_PURPOSE_PATTERN.matcher(purpose);
-                if (dm.find()) {
-                    try {
-                        opDate = LocalDate.of(Integer.parseInt(dm.group(3)),
-                                Integer.parseInt(dm.group(2)), Integer.parseInt(dm.group(1)));
-                    } catch (RuntimeException ignored) { }
-                }
-            }
-
-            String problem = null;
-            if (opDate == null) problem = "не найдена дата операции";
-            else if (amount == null || amount.signum() <= 0) problem = "не найдена корректная сумма";
-            else if (incoming == outgoing) problem = "не удалось определить тип операции (поступление/списание)";
-            if (apartment == null) apartment = fallbackApartment;
-
-            rows.add(new ImportRow(orderNo, opDate, amount, incoming ? payer : payee, purpose,
-                    incoming, apartment, problem));
-            i = Math.max(i, end - 1);
         }
-        return rows;
+
+        // Единый быстрый пересчёт цепочек сальдо всех затронутых квартир.
+        ledgerService.recalculateAll(touchedApartments);
+
+        long after = saldoRepository.count();
+        return new ImportResult(payments, charges, (int) Math.max(0, after - before),
+                problems, touchedApartments);
     }
 
-    /** Самый частый 20-значный номер в указанном столбце (для блочного листа — столбец AD). */
-    private String detectMostFrequentAccountInColumn(List<String[]> grid, int column) {
-        Map<String, Integer> freq = new HashMap<>();
-        for (String[] row : grid) {
-            String v = row.length > column ? row[column] : null;
-            if (v == null) continue;
-            Matcher m = Pattern.compile("^\\s*(\\d{20})\\s*$").matcher(v);
-            if (m.matches()) freq.merge(m.group(1), 1, Integer::sum);
+    private String executedAtText(ImportRow row) {
+        LocalDateTime executedAt = row.executedAt();
+        if (executedAt == null) {
+            executedAt = row.date().atStartOfDay();
         }
-        return freq.entrySet().stream()
-                .max(Comparator.comparingInt(Map.Entry::getValue))
-                .map(Map.Entry::getKey)
-                .orElse(null);
+        return "%s %02d:%02d".formatted(row.date(), executedAt.getHour(), executedAt.getMinute());
     }
 
-    /** К чьей подписи («Плательщик»/«Получатель») относится строка со счётом. true = Плательщик. */
-    private boolean sideLabelIsPayer(List<String[]> grid, int accountRow, int blockStart) {
-        for (int j = accountRow; j >= blockStart; j--) {
-            String b = cell(grid, j, 1);
-            if (b == null) continue;
-            String t = b.trim();
-            if (t.equals("Плательщик")) return true;
-            if (t.equals("Получатель")) return false;
-        }
-        return false;
-    }
-
-    private String partyNameAbove(List<String[]> grid, int labelRow, int blockStart) {
-        for (int j = labelRow - 1; j >= blockStart; j--) {
-            String b = cell(grid, j, 1);
-            if (b == null) continue;
-            String t = b.trim();
-            if (t.isEmpty()) continue;
-            if (t.equals("Банк Плательщика") || t.equals("Банк Получателя") || t.equals("ИНН")
-                    || t.startsWith("Сч. №") || t.equals("БИК") || t.matches("(?i)^г\\.?\\s.*")) {
-                break;
-            }
-            return truncate(t, 300);
-        }
-        return null;
-    }
-
-    // ======================= общие утилиты =======================
-
-    private String buildDescription(ImportRow row) {
-        StringBuilder sb = new StringBuilder();
+    private String buildChargeDescription(ImportRow row) {
+        StringBuilder sb = new StringBuilder("Списание по выписке");
         if (row.party() != null && !row.party().isBlank()) {
-            sb.append(truncate(row.party().trim(), 300)).append(". ");
+            sb.append(", получатель: ").append(row.party());
         }
         if (row.purpose() != null && !row.purpose().isBlank()) {
-            sb.append(truncate(row.purpose().trim(), 650));
-        }
-        if (sb.isEmpty()) {
-            sb.append("Операция из выписки №").append(row.orderNo());
-        }
-        return sb.toString();
-    }
-
-    private static Integer extractApartment(String purpose) {
-        if (purpose == null) return null;
-        Matcher am = APARTMENT_PATTERN.matcher(purpose);
-        String last = null;
-        while (am.find()) last = am.group(1);
-        if (last == null) return null;
-        try {
-            int v = Integer.parseInt(last);
-            return (v > 0 && v < 1000) ? v : null;
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
-    }
-
-    private static boolean isDateLike(String text) {
-        return text != null && text.matches("\\d{1,4}[./-]\\d{1,2}[./-]\\d{2,4}.*");
-    }
-
-    private static LocalDate parseDate(String text) {
-        if (text == null) return null;
-        String s = text.trim();
-        Matcher m = Pattern.compile("^(\\d{4})[./-](\\d{1,2})[./-](\\d{1,2})").matcher(s);
-        if (m.find()) {
-            try {
-                return LocalDate.of(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
-            } catch (RuntimeException ignored) { }
-        }
-        m = Pattern.compile("^(\\d{1,2})[./-](\\d{1,2})[./-](\\d{4})").matcher(s);
-        if (m.find()) {
-            try {
-                return LocalDate.of(Integer.parseInt(m.group(3)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(1)));
-            } catch (RuntimeException ignored) { }
-        }
-        return null;
-    }
-
-    private static BigDecimal parseAmount(String text) {
-        if (text == null) return null;
-        String s = text.replace('\u00A0', ' ').trim();
-        if (s.isEmpty()) return null;
-        Matcher dash = Pattern.compile("^(-?\\d+)-(\\d{2})$").matcher(s);
-        if (dash.matches()) {
-            return new BigDecimal(dash.group(1) + "." + dash.group(2));
-        }
-        String cleaned = s.replace(" ", "").replace(",", ".");
-        if (cleaned.chars().filter(c -> c == '.').count() > 1) {
-            cleaned = cleaned.replaceAll("\\.(?=\\D)", "");
-        }
-        try {
-            return new BigDecimal(cleaned).setScale(2, RoundingMode.HALF_UP);
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-    }
-
-    private static String trim(String value) {
-        return value == null ? null : value.trim();
-    }
-
-    private static String truncate(String value, int max) {
-        if (value == null) return "";
-        return value.length() <= max ? value : value.substring(0, max);
-    }
-
-    private static String messageOf(Throwable ex) {
-        Throwable current = ex;
-        while (current.getCause() != null && current.getCause() != current && current.getMessage() == null) {
-            current = current.getCause();
-        }
-        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
-    }
-
-    private static String label(ImportRow row) {
-        return "Операция №" + (row.orderNo() == null || row.orderNo().isEmpty() ? "?" : row.orderNo())
-                + " (" + row.date() + ", " + row.amount() + ")";
-    }
-
-    private static String cell(List<String[]> grid, int rowIdx, int colIdx) {
-        if (rowIdx < 0 || rowIdx >= grid.size() || colIdx < 0) return null;
-        String[] row = grid.get(rowIdx);
-        if (colIdx >= row.length) return null;
-        String v = row[colIdx];
-        return v == null || v.isBlank() ? null : v;
-    }
-
-    /** Потоковый сборщик ячеек листа в «сетку» строк для разбора выписки. */
-    private static final class GridCollector implements XSSFSheetXMLHandler.SheetContentsHandler {
-        private final List<String[]> grid;
-        private String[] currentRow = new String[0];
-
-        GridCollector(List<String[]> grid) { this.grid = grid; }
-
-        @Override public void startRow(int rowNum) {
-            while (grid.size() < rowNum) grid.add(new String[0]);
-            currentRow = new String[0];
-        }
-
-        @Override public void endRow(int rowNum) {
-            while (grid.size() <= rowNum) grid.add(new String[0]);
-            grid.set(rowNum, currentRow);
-        }
-
-        @Override public void cell(String cellReference, String formattedValue, XSSFComment comment) {
-            int col = cellRefToColumn(cellReference);
-            if (col < 0 || col > 2000) return;
-            if (currentRow.length < col + 1) {
-                String[] grown = new String[Math.max(col + 1, currentRow.length * 2)];
-                System.arraycopy(currentRow, 0, grown, 0, currentRow.length);
-                currentRow = grown;
+            String p = row.purpose();
+            if (p.length() > 140) {
+                p = p.substring(0, 140);
             }
-            currentRow[col] = formattedValue;
+            sb.append(" — ").append(p);
         }
+        String text = sb.toString();
+        return text.length() > 255 ? text.substring(0, 255) : text;
+    }
 
-        static int cellRefToColumn(String ref) {
-            int col = 0;
-            for (int i = 0; i < ref.length(); i++) {
-                char ch = ref.charAt(i);
-                if (ch >= 'A' && ch <= 'Z') col = col * 26 + (ch - 'A' + 1);
-                else if (ch >= 'a' && ch <= 'z') col = col * 26 + (ch - 'a' + 1);
-                else break;
-            }
-            return col - 1;
-        }
+    private boolean paymentExists(ImportRow row) {
+        LocalDateTime time = row.executedAt() == null ? row.date().atStartOfDay() : row.executedAt();
+        LocalDate period = LocalDate.of(row.date().getYear(), row.date().getMonthValue(), 1);
+        return paymentRepository.existsByApartmentNumberAndPeriodAndPaymentTimeAndAmount(
+                row.apartment(), period, time, row.amount());
+    }
+
+    private boolean chargeExists(ImportRow row) {
+        return chargeRepository.existsByApartmentNumberAndPeriodAndAmount(
+                row.apartment(), row.date(), row.amount());
     }
 }

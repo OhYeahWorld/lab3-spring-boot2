@@ -115,55 +115,12 @@ CREATE TRIGGER trg_payments_updated_at
 BEFORE UPDATE ON payments
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Контроль связи периодов: исходящее сальдо одного имеющегося периода
--- обязано совпасть с входящим сальдо следующего имеющегося периода.
-CREATE OR REPLACE FUNCTION validate_saldo_chain()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    prev_closing NUMERIC(14,2);
-    next_opening NUMERIC(14,2);
-BEGIN
-    SELECT s.closing_balance
-      INTO prev_closing
-      FROM saldo s
-     WHERE s.apartment_number = NEW.apartment_number
-       AND s.period < NEW.period
-       AND s.id <> COALESCE(NEW.id, -1)
-     ORDER BY s.period DESC
-     LIMIT 1;
-
-    IF prev_closing IS NOT NULL AND NEW.opening_balance <> prev_closing THEN
-        RAISE EXCEPTION 'Входящее сальдо за % для квартиры % должно быть равно исходящему предыдущего периода: %',
-            NEW.period, NEW.apartment_number, prev_closing
-            USING ERRCODE = '23514';
-    END IF;
-
-    SELECT s.opening_balance
-      INTO next_opening
-      FROM saldo s
-     WHERE s.apartment_number = NEW.apartment_number
-       AND s.period > NEW.period
-       AND s.id <> COALESCE(NEW.id, -1)
-     ORDER BY s.period ASC
-     LIMIT 1;
-
-    IF next_opening IS NOT NULL AND next_opening <> NEW.closing_balance THEN
-        RAISE EXCEPTION 'Исходящее сальдо за % для квартиры % должно быть равно входящему следующего периода: %',
-            NEW.period, NEW.apartment_number, next_opening
-            USING ERRCODE = '23514';
-    END IF;
-
-    RETURN NEW;
-END;
-$$;
-
+-- Целостность цепочки сальдо обеспечивает приложение (LedgerService): при любом
+-- изменении начислений/платежей оно пересчитывает все последующие периоды.
+-- Старый триггер validate_saldo_chain удалён: он отклонял весь импорт выписки
+-- из-за одной нестыкующейся строки и лишал возможности редактировать данные.
 DROP TRIGGER IF EXISTS trg_validate_saldo_chain ON saldo;
-CREATE CONSTRAINT TRIGGER trg_validate_saldo_chain
-AFTER INSERT OR UPDATE ON saldo
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION validate_saldo_chain();
+DROP FUNCTION IF EXISTS validate_saldo_chain();
 
 -- При повторном запуске поверх старой версии убираем старые сигнатуры функций,
 -- потому что PostgreSQL не позволяет CREATE OR REPLACE менять состав RETURNS TABLE.

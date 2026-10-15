@@ -19,6 +19,9 @@ public interface ChargeRepository extends JpaRepository<Charge, Long> {
     @Query("select coalesce(sum(c.amount), 0) from Charge c where c.apartmentNumber = :apartment and c.period = :period")
     BigDecimal sumAmount(@Param("apartment") Integer apartment, @Param("period") LocalDate period);
 
+    @Query("select c.period, sum(c.amount) from Charge c where c.apartmentNumber in :apartments group by c.period")
+    List<Object[]> sumAmountByApartmentAndPeriod(@Param("apartments") java.util.Collection<Integer> apartments);
+
     List<Charge> findByApartmentNumberOrderByPeriodDescIdDesc(Integer apartmentNumber);
 
     List<Charge> findByApartmentNumberAndPeriodBetweenOrderByPeriodAscIdAsc(
