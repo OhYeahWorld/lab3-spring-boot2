@@ -20,7 +20,6 @@ import ru.lab3.accounting.model.Charge;
 import ru.lab3.accounting.model.Payment;
 import ru.lab3.accounting.service.LedgerService;
 
-import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
@@ -41,7 +40,7 @@ public class DataController {
         if (!model.containsAttribute("saldoForm")) {
             SaldoForm form = new SaldoForm();
             form.setPeriod(YearMonth.now(clock).toString());
-            form.setOpeningBalance(BigDecimal.ZERO.setScale(2));
+            form.setOpeningBalance("0");
             model.addAttribute("saldoForm", form);
         }
         model.addAttribute("rows", ledgerService.listSaldo());
@@ -80,7 +79,7 @@ public class DataController {
                 form.setId(c.getId());
                 form.setApartmentNumber(c.getApartmentNumber());
                 form.setPeriod(c.getPeriod().toString().substring(0, 7));
-                form.setAmount(c.getAmount());
+                form.setAmount(c.getAmount().toPlainString());
                 form.setDescription(c.getDescription());
             }
         }
@@ -143,7 +142,7 @@ public class DataController {
                 form.setApartmentNumber(p.getApartmentNumber());
                 form.setPeriod(p.getPeriod().toString().substring(0, 7));
                 form.setPaymentTime(p.getPaymentTime().withNano(0).toString());
-                form.setAmount(p.getAmount());
+                form.setAmount(p.getAmount().toPlainString());
                 form.setPaymentReference(p.getPaymentReference());
             }
         }

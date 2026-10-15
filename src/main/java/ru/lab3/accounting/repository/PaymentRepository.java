@@ -11,6 +11,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 public interface PaymentRepository extends JpaRepository<Payment, Long> {
+    boolean existsByPaymentReference(String paymentReference);
+
     boolean existsByApartmentNumberAndPeriodAndPaymentTimeAndAmount(
             Integer apartmentNumber, LocalDate period, LocalDateTime paymentTime, BigDecimal amount);
 

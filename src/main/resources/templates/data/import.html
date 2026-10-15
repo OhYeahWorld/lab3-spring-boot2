@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Загрузка выписки')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <div class="page-title"><div><p class="eyebrow">Импорт из Excel</p><h1>Загрузка банковской выписки</h1></div></div>
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="card form-card">
+        <div class="card-head"><h2>Файл выписки</h2><span class="hint">Поддерживается формат .xlsx (СберБизнес). Сначала — предпросмотр, затем импорт.</span></div>
+        <p class="hint" th:if="${notice}" th:text="${notice}"></p>
+
+        <form th:action="@{/data/import/preview}" method="post" enctype="multipart/form-data" class="form-grid">
+            <label>Файл выписки
+                <input type="file" name="file" accept=".xlsx" required>
+            </label>
+            <button class="button primary" type="submit">Разобрать файл</button>
+        </form>
+
+        <form th:if="${parsedRows != null and !parsedRows.isEmpty()}"
+              th:action="@{/data/import/run}" method="post" class="form-grid">
+            <span class="hint">Файл: <b th:text="${fileName}">выписка.xlsx</b>. Все операции из списка ниже будут внесены в базу. Сальдо и промежуточные периоды создадутся автоматически.</span>
+            <button class="button primary" type="submit"
+                    onclick="return confirm('Импортировать операции в базу?');">Импортировать</button>
+        </form>
+    </section>
+
+    <section class="card" th:if="${parsedRows != null and !parsedRows.isEmpty()}">
+        <div class="card-head"><h2>Предпросмотр операций</h2><span class="hint">Поступления → платежи, списания → начисления.</span></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>№ поручения</th><th>Дата</th><th>Тип</th><th>Сумма</th><th>Квартира</th><th>Контрагент</th><th>Назначение</th><th>Проблема</th></tr></thead>
+                <tbody>
+                <tr th:each="row : ${parsedRows}">
+                    <td th:text="${row.orderNo}">1</td>
+                    <td th:text="${row.date != null ? #temporals.format(row.date, 'dd.MM.yyyy') : '—'}">01.01.2018</td>
+                    <td th:text="${row.incoming ? 'Поступление' : 'Списание'}">Поступление</td>
+                    <td class="money" th:text="${row.amount != null ? #numbers.formatDecimal(row.amount,1,2) : '—'}">0.00</td>
+                    <td th:text="${row.apartment != null ? row.apartment : 'авто'}">76</td>
+                    <td th:text="${row.party}">ООО</td>
+                    <td th:text="${row.purpose}">—</td>
+                    <td class="danger" th:text="${row.problem}"></td>
+                </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+</body>
+</html>
