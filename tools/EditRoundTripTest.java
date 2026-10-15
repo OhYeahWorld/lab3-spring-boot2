@@ -41,6 +41,13 @@ public class EditRoundTripTest {
         return v == null ? "" : String.valueOf(v);
     }
 
+    /**
+     * Имитация POST-запроса браузера. При truncateSome у каждой третьей строки
+     * поля incoming/apartment НЕ отправляются вовсе (параметры отсутствуют в
+     * запросе) — так сервер видит обрезанную форму и доливает их из сохранённого
+     * разбора. Пустое значение параметра, наоборот, трактуется как осознанная
+     * правка пользователя и не подменяется.
+     */
     static MockHttpServletRequest formRequest(MockHttpSession session, List<Cell> cells, boolean truncateSome) {
         MockHttpServletRequest req = new MockHttpServletRequest("POST", "/data/import/edit");
         req.setSession(session);
@@ -54,8 +61,10 @@ public class EditRoundTripTest {
             req.setParameter("rows[" + idx + "].purpose", c.purpose());
             // имитация обрезанной формы: у каждой третьей строки поля не дошли
             boolean cut = truncateSome && idx % 3 == 2;
-            req.setParameter("rows[" + idx + "].incoming", cut ? "" : c.incoming());
-            req.setParameter("rows[" + idx + "].apartment", cut ? "" : c.apartment());
+            if (!cut) {
+                req.setParameter("rows[" + idx + "].incoming", c.incoming());
+                req.setParameter("rows[" + idx + "].apartment", c.apartment());
+            }
             req.setParameter("rows[" + idx + "].problem", c.problem());
             idx++;
         }
