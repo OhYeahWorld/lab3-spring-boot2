@@ -110,26 +110,39 @@ public class ImportController {
     private static final Pattern ROW_INDEX_PATTERN = Pattern.compile("^rows\\[(\\d+)\\]\\.(\\w+)$");
 
     /**
-     * Читает строки таблицы прямо из POST-параметров вида rows[0].date, rows[1].amount и т.д.
-     * Такой подход не зависит от механизмов привязки данных Spring и работает всегда.
+     * Читает строки таблицы из POST-параметров. Поддерживаются оба формата имён:
+     * «rows[0].date» (Thymeleaf-шаблон) и «rows[0][date]» (альтернативный), чтобы
+     * форма надёжно разбиралась независимо от мелочей разметки.
      */
     private static List<ParsedRowForm> readRowsFromRequest(HttpServletRequest request) {
         Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
-        for (String name : request.getParameterMap().keySet()) {
+        for (Map.Entry<String, String[]> entry : request.getParameterMap().entrySet()) {
+            String name = entry.getKey();
+            String field;
+            int index;
             Matcher m = ROW_INDEX_PATTERN.matcher(name);
-            if (!m.matches()) {
+            if (m.matches()) {
+                index = Integer.parseInt(m.group(1));
+                field = m.group(2);
+            } else if (name.startsWith("rows[") && name.contains("][")) {
+                int close = name.indexOf(']');
+                index = parseIntOr(name.substring(5, close), -1);
+                field = name.substring(close + 2, name.length() - 1);
+            } else {
                 continue;
             }
-            int index = Integer.parseInt(m.group(1));
-            String field = m.group(2);
-            String value = request.getParameter(name);
+            if (index < 0) {
+                continue;
+            }
+            String[] values = entry.getValue();
+            String value = values == null || values.length == 0 ? "" : values[0];
             ParsedRowForm f = byIndex.computeIfAbsent(index, k -> new ParsedRowForm());
             switch (field) {
                 case "orderNo" -> {
                     if (value != null && !value.isBlank()) {
-                        try {
-                            f.setOrderNo(Integer.parseInt(value.trim()));
-                        } catch (NumberFormatException ignored) {
+                        int no = parseIntOr(value.trim(), -1);
+                        if (no > 0) {
+                            f.setOrderNo(no);
                         }
                     }
                 }
@@ -159,6 +172,14 @@ public class ImportController {
             result.add(f);
         }
         return result;
+    }
+
+    private static int parseIntOr(String text, int fallback) {
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
     }
 
     /** Форма, в которую не попало ни одно значение. */
@@ -227,7 +248,8 @@ public class ImportController {
             String dateProblem = null;
             if (date != null && !date.isBlank()) {
                 try {
-                    parsedDate = LedgerService.parseDateText(date);
+                    // «2018-01-15 05:45:38» — время режем до разбора даты
+                    parsedDate = LedgerService.parseDateText(date.trim().split("[ T]")[0]);
                 } catch (RuntimeException ex) {
                     dateProblem = StatementImportService.PROBLEM_DATE;
                 }
@@ -246,10 +268,23 @@ public class ImportController {
 
             Integer parsedApartment = null;
             if (apartment != null && !apartment.isBlank()) {
+                String a = apartment.trim();
                 try {
-                    parsedApartment = Integer.parseInt(apartment.trim());
+                    parsedApartment = Integer.parseInt(a);
                 } catch (NumberFormatException ex) {
-                    // некорректный номер — останется пустым
+                    try {
+                        // допускаем «кв. 164», «л/с 0000000134» и т.п.
+                        java.util.regex.Matcher m = java.util.regex.Pattern
+                                .compile("(\\d{1,4})\\s*$").matcher(a.replaceAll("\\s+", " ").trim());
+                        if (m.find()) {
+                            int v = Integer.parseInt(m.group(1));
+                            if (v > 0 && v < 1000) {
+                                parsedApartment = v;
+                            }
+                        }
+                    } catch (RuntimeException ignored) {
+                        // некорректный номер — останется пустым
+                    }
                 }
             }
 
