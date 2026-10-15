@@ -72,11 +72,16 @@ public class ImportController {
 
     @PostMapping("/commit")
     public String commit(@RequestParam(value = "rows", required = false) List<ParsedRowForm> rows,
+                         Model model,
                          RedirectAttributes ra) {
         List<ParsedRowForm> safe = clean(rows);
         if (safe.isEmpty()) {
-            ra.addFlashAttribute("error", "Нет данных для импорта — сначала загрузите файл.");
-            return "redirect:/data/import";
+            // Форма пришла без строк (например, из-за ошибки привязки данных) —
+            // показываем предпросмотр заново вместо пустого редиректа.
+            model.addAttribute("parsedRows", rows == null ? List.of() : rows);
+            model.addAttribute("error", "Не удалось прочитать строки таблицы. "
+                    + "Проверьте данные и попробуйте ещё раз, либо загрузите файл заново.");
+            return page(model);
         }
         try {
             List<StatementImportService.ImportRow> importRows = new ArrayList<>();
@@ -108,6 +113,15 @@ public class ImportController {
             if (row == null) {
                 continue;
             }
+            if (isBlankForm(row)) {
+                // Spring не смог привязать поля к объекту — восстанавливаем их напрямую из параметров запроса.
+                ParsedRowForm recovered = recoverFromParams(index + 1);
+                if (recovered != null) {
+                    result.add(recovered);
+                    index++;
+                    continue;
+                }
+            }
             if (row.getOrderNo() == null) {
                 row.setOrderNo(++index);
             } else {
@@ -116,6 +130,68 @@ public class ImportController {
             result.add(row);
         }
         return result;
+    }
+
+    /** Форма, в которую не попало ни одно поле (все значения остались дефолтными). */
+    private static boolean isBlankForm(ParsedRowForm row) {
+        return row.getOrderNo() == null
+                && isBlank(row.getDate()) && isBlank(row.getTime()) && isBlank(row.getAmount())
+                && isBlank(row.getParty()) && isBlank(row.getPurpose()) && isBlank(row.getIncoming())
+                && isBlank(row.getApartment()) && isBlank(row.getProblem());
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    /**
+     * Подстраховка на случай сбоя привязки данных: читает строку таблицы прямо из
+     * POST-параметров вида rows[0].date, rows[0].amount и т.д.
+     */
+    private static ParsedRowForm recoverFromParams(int position) {
+        ParsedRowForm f = new ParsedRowForm();
+        boolean found = false;
+        String[][] fields = {{"orderNo", null}, {"date", "date"}, {"time", "time"}, {"amount", "amount"},
+                {"party", "party"}, {"purpose", "purpose"}, {"incoming", "incoming"},
+                {"apartment", "apartment"}, {"problem", "problem"}};
+        // порядок не важен — просто заполняем известные поля
+        String prefix = "rows[" + (position - 1) + "].";
+        try {
+            org.springframework.web.context.request.ServletRequestAttributes attrs =
+                    (org.springframework.web.context.request.ServletRequestAttributes)
+                            org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+            if (attrs == null) {
+                return null;
+            }
+            jakarta.servlet.http.HttpServletRequest request = attrs.getRequest();
+            String orderNo = request.getParameter(prefix + "orderNo");
+            if (orderNo != null && !orderNo.isBlank()) {
+                f.setOrderNo(Integer.parseInt(orderNo.trim()));
+                found = true;
+            }
+            for (String[] fd : fields) {
+                if (fd[1] == null) {
+                    continue;
+                }
+                String v = request.getParameter(prefix + fd[1]);
+                if (v != null) {
+                    switch (fd[1]) {
+                        case "date" -> f.setDate(v);
+                        case "time" -> f.setTime(v);
+                        case "amount" -> f.setAmount(v);
+                        case "party" -> f.setParty(v);
+                        case "purpose" -> f.setPurpose(v);
+                        case "incoming" -> f.setIncoming(v);
+                        case "apartment" -> f.setApartment(v);
+                        case "problem" -> f.setProblem(v);
+                    }
+                    found = true;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+        return found ? f : null;
     }
 
     // ==================== форма предпросмотра ====================
