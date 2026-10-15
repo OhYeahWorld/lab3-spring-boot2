@@ -1,4 +1,5 @@
 ru/lab3/accounting/AccountingApplication.class
+ru/lab3/accounting/service/StatementImportService$GridCollector.class
 ru/lab3/accounting/controller/DataController.class
 ru/lab3/accounting/config/DatabaseInitializer.class
 ru/lab3/accounting/repository/ReportRepository.class
@@ -29,7 +30,6 @@ ru/lab3/accounting/repository/report/DebtorReportRow.class
 ru/lab3/accounting/config/TimeFormat.class
 ru/lab3/accounting/service/StatementImportService$TableLayout.class
 ru/lab3/accounting/service/LedgerService.class
-ru/lab3/accounting/service/StatementImportService$1.class
 ru/lab3/accounting/exception/BalanceIntegrityException.class
 ru/lab3/accounting/controller/ImportController.class
 ru/lab3/accounting/repository/report/ApartmentReportRow.class
