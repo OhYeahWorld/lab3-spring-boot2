@@ -1190,8 +1190,12 @@ public class StatementImportService {
         Set<Integer> touchedApartments = new LinkedHashSet<>();
 
         for (ImportRow row : rows) {
-            if (row.problem() != null) {
-                problems.add("строка №" + row.orderNo() + ": " + row.problem());
+            // Проблема считается актуальной только по фактическим данным строки:
+            // если пользователь вписал квартиру/дату/сумму в таблице предпросмотра,
+            // устаревшая метка «проблемы» игнорируется и строка импортируется.
+            String effectiveProblem = recomputeProblem(row);
+            if (effectiveProblem != null) {
+                problems.add("строка №" + row.orderNo() + ": " + effectiveProblem);
                 continue;
             }
             try {
@@ -1230,6 +1234,25 @@ public class StatementImportService {
         long after = saldoRepository.count();
         return new ImportResult(payments, charges, (int) Math.max(0, after - before),
                 problems, touchedApartments);
+    }
+
+    /**
+     * Пересчитывает проблему строки по её фактическим данным. Нужно потому, что
+     * метка problem() ставится на этапе разбора файла; после ручных правок в
+     * предпросмотре (например, пользователь вписал номер квартиры) старая метка
+     * может остаться устаревшей и ошибочно блокировать импорт.
+     */
+    public static String recomputeProblem(ImportRow row) {
+        if (row.date() == null) {
+            return PROBLEM_DATE;
+        }
+        if (row.amount() == null || row.amount().signum() <= 0) {
+            return PROBLEM_AMOUNT;
+        }
+        if (row.apartment() == null || row.apartment() <= 0) {
+            return PROBLEM_APARTMENT;
+        }
+        return null;
     }
 
     private String executedAtText(ImportRow row) {
