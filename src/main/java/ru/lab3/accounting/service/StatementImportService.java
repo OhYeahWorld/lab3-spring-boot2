@@ -75,11 +75,14 @@ public class StatementImportService {
 
     private static final Pattern DATE_TIME = Pattern.compile(
             "^(\\d{4})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?");
+    /** Excel-serial даты в диапазоне 1990–2100 годов (на случай, если лист отдаёт сырое число). */
+    private static final double SERIAL_MIN = 36526d;   // 01.01.2000 ≈ 36526
+    private static final double SERIAL_MAX = 73415.d;  // ~31.12.2100
     private static final Pattern ORDER_NO = Pattern.compile(
             "(?:ПЛАТЕЖНОЕ\\s+ПОРУЧЕНИЕ|РЕКВИЗИТЫ)\\s*№?\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
     /** л/с, л.с, ЛС 123, ЛСЧ 0000000111, «л с 164», кв., квартира 76, лиц. счет 88 — берётся последнее совпадение. */
     private static final Pattern APARTMENT_HINT = Pattern.compile(
-            "(?:кв(?:артир)?а?|л[./\\s-]?с[./\\sч]*|лиц[.\\s-]*(?:счет|счёт))[^0-9a-zа-я]{0,4}(\\d{1,4})",
+            "(?:кв(?:артир)?а?|л[./\\s-]?с[./\\sч]*|лиц[.\\s-]*(?:счет|счёт))[^0-9a-zа-я]{0,4}(\\d{1,9})",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     /** Адрес в строке контрагента: «… Д 12 К 2 КВ 164». */
     private static final Pattern KV_ADDRESS = Pattern.compile(
@@ -386,6 +389,27 @@ public class StatementImportService {
                 }
             }
             if (dateCol >= 0 && (debitSumCol >= 0 || creditSumCol >= 0)) {
+                // Подписи «Дебет»/«Кредит» могут стоять на строку ВЫШЕ заголовков сумм —
+                // ищем их там, если в самой строке заголовка их нет.
+                if (debitAccCol < 0 || creditAccCol < 0) {
+                    for (int up = Math.max(0, r - 2); up <= r; up++) {
+                        if (up == r) {
+                            continue;
+                        }
+                        String[] upper = grid.get(up);
+                        if (upper == null) {
+                            continue;
+                        }
+                        for (int c = 0; c < upper.length; c++) {
+                            String t = upper[c] == null ? null : upper[c].trim().toLowerCase(Locale.ROOT);
+                            if ("дебет".equals(t) && debitAccCol < 0 && isAccountColumnNear(grid, r, c, debitSumCol)) {
+                                debitAccCol = c;
+                            } else if ("кредит".equals(t) && creditAccCol < 0 && isAccountColumnNear(grid, r, c, creditSumCol)) {
+                                creditAccCol = c;
+                            }
+                        }
+                    }
+                }
                 if (debitAccCol < 0) {
                     debitAccCol = findAccountColumn(grid, r, debitSumCol);
                 }
@@ -397,6 +421,20 @@ public class StatementImportService {
             }
         }
         return null;
+    }
+
+    /** Колонка со 20-значными счетами должна лежать левее колонки сумм этой же стороны. */
+    private boolean isAccountColumnNear(List<String[]> grid, int headerRow, int accCol, int sumCol) {
+        if (sumCol >= 0 && accCol > sumCol) {
+            return false;
+        }
+        for (int r = headerRow + 1; r <= Math.min(headerRow + 3, grid.size() - 1); r++) {
+            String v = cell(grid, r, accCol);
+            if (v != null && ACCOUNT20.matcher(v.replaceAll("\\s", "")).find()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Ищем подпись «Дебет»/«Кредит» чуть выше колонки суммы — это колонка счетов. */
@@ -728,7 +766,7 @@ public class StatementImportService {
     private record DateParts(LocalDate date, LocalDateTime dateTime) {
     }
 
-    /** Поддерживает ISO («2018-01-15 05:45:38») и привычный русскоязычный вид («15.01.2018», «15/1/18»). */
+    /** Поддерживает ISO («2018-01-15 05:45:38»), русскоязычный вид («15.01.2018», «15/1/18») и serial Excel. */
     private DateParts parseDateTimeText(String text) {
         if (text == null || text.isBlank()) {
             return null;
@@ -747,6 +785,22 @@ public class StatementImportService {
                 return null;
             }
         }
+        // Excel serial: «43103.24» или «43103,24» — только если число целиком и в диапазоне лет.
+        String num = s.replace(',', '.');
+        if (num.matches("\\d{5}(\\.\\d+)?")) {
+            try {
+                double serial = Double.parseDouble(num);
+                if (serial >= SERIAL_MIN && serial <= SERIAL_MAX) {
+                    java.time.LocalDate d = org.apache.poi.ss.usermodel.DateUtil
+                            .getDateFromJavaDouble(serial);
+                    long dayPart = (long) (serial % 1 * 86400);
+                    return new DateParts(d, d.atStartOfDay()
+                            .plusSeconds(dayPart / 1000 * 1000));
+                }
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+        }
         try {
             LocalDate date = LedgerService.parseDateText(s.split("[ T]")[0]);
             return new DateParts(date, date.atStartOfDay());
@@ -755,13 +809,18 @@ public class StatementImportService {
         }
     }
 
-    /** Номер квартиры из назначения платежа, затем из адреса «КВ N», затем из маски «...,38,86». */
+    /** Номер квартиры из назначения, затем из адреса («КВ N», «Д 12 К 2»), затем из маски лицевых счетов. */
     private Integer extractApartment(String purpose, String fallbackText) {
+        // Сначала ищем в назначении с приоритетом явных подсказок: л/с > кв. > адресные маски.
+        Integer explicit = explicitApartmentHint(purpose);
+        if (explicit != null) {
+            return explicit;
+        }
         Integer fromPurpose = lastApartmentMatch(purpose);
         if (fromPurpose != null) {
             return fromPurpose;
         }
-        Integer fromAddress = lastKvAddressMatch(fallbackText);
+        Integer fromAddress = addressApartment(fallbackText);
         if (fromAddress != null) {
             return fromAddress;
         }
@@ -772,6 +831,86 @@ public class StatementImportService {
         return lastMaskTailMatch(fallbackText);
     }
 
+    private static final Pattern LS_EXPLICIT = Pattern.compile(
+            "(?:л[/\\\\s.]?с[\\\\sч.]*|лиц[.\\\\s-]*(?:счет|счёт))[^0-9]{0,3}(\\d{1,9})(?![0-9])",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern KV_EXPLICIT = Pattern.compile(
+            "(?:кв(?:артир)?а?)[^0-9а-я]{0,3}(\\d{1,4})(?![0-9])",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    /** Адресный хвост вида «Д 12 К 2 КВ 164» или «12-2-24»: дом, корпус, квартира. */
+    private static final Pattern ADDRESS_TRIPLE = Pattern.compile(
+            "(?:Д[.\\\\s]?\\s*(\\d{1,4}))\\s*(?:К[.\\\\s]?\\s*(\\d{1,3}))?\\s*(?:КВ[.\\\\s]?\\s*(\\d{1,4}))",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    /** Чистый номер лицевого счёта: длинные маски типа 0000000134 -> 134. */
+    private Integer normalizeAccountNumber(String digits) {
+        try {
+            int v = Integer.parseInt(digits);
+            if (v <= 0 || v >= 100000) {
+                return null;
+            }
+            return v;
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    /** Явные подсказки: сначала л/с (в т.ч. маска 0000000134), затем «кв./квартира N». */
+    private Integer explicitApartmentHint(String text) {
+        if (text == null) {
+            return null;
+        }
+        Matcher ls = LS_EXPLICIT.matcher(text);
+        Integer fromLs = null;
+        while (ls.find()) {
+            Integer v = normalizeAccountNumber(ls.group(1));
+            if (v != null) {
+                fromLs = v;
+            }
+        }
+        if (fromLs != null) {
+            return fromLs;
+        }
+        Matcher kv = KV_EXPLICIT.matcher(text);
+        Integer fromKv = null;
+        while (kv.find()) {
+            int v = Integer.parseInt(kv.group(1));
+            if (v > 0 && v < 1000) {
+                fromKv = v;
+            }
+        }
+        return fromKv;
+    }
+
+    /** Квартира из адресного хвоста строки контрагента: «… Д 12 К 2 КВ 164» или «БУЛЬВАР 12-2-24 …». */
+    private Integer addressApartment(String text) {
+        if (text == null) {
+            return null;
+        }
+        Matcher m = ADDRESS_TRIPLE.matcher(text);
+        Integer last = null;
+        while (m.find()) {
+            if (m.group(3) != null) {
+                int v = Integer.parseInt(m.group(3));
+                if (v > 0 && v < 1000) {
+                    last = v;
+                }
+            }
+        }
+        if (last != null) {
+            return last;
+        }
+        // Формат «ОСЕННИЙ Б-Р 12-2-24»: три числа через дефис — дом-корпус-квартира.
+        Matcher triple = Pattern.compile("(?<![\\d/.])(\\d{1,4})-(\\d{1,3})-(\\d{1,4})(?![\\d/.])")
+                .matcher(text.toUpperCase(Locale.ROOT));
+        while (triple.find()) {
+            int apt = Integer.parseInt(triple.group(3));
+            if (apt > 0 && apt < 1000) {
+                last = apt;
+            }
+        }
+        return last;
+    }
+
     private Integer lastApartmentMatch(String text) {
         if (text == null) {
             return null;
@@ -779,7 +918,9 @@ public class StatementImportService {
         Integer last = null;
         Matcher m = APARTMENT_HINT.matcher(text);
         while (m.find()) {
-            int value = Integer.parseInt(m.group(1));
+            // маска лицевого счёта «0000000134» -> значимые цифры 134
+            String digits = m.group(1).replaceFirst("^0+(?!$)", "");
+            int value = Integer.parseInt(digits);
             if (value > 0 && value < 1000) {
                 last = value;
             }
