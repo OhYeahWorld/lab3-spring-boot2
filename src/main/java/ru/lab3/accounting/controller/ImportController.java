@@ -133,56 +133,22 @@ public class ImportController {
     }
 
     /**
-     * Собирает строки из POST-параметров формы. Если форма пришла без строк
-     * (обрезана сервером, открыта в другой вкладке и т.п.) — берёт последний
-     * сохранённый разбор из ParsedRowsStore. Поле, которое вообще не дошло в
-     * запросе, доливается из сохранённой строки; поле, присланное пустым, —
-     * это осознанная правка пользователя (ячейку очистили), его не подменяем.
+     * Собирает строки ТОЛЬКО из POST-параметров формы — именно то, что пользователь
+     * видит в таблице. Никакого «доливания» из сессии: если поле пришло пустым,
+     * оно остаётся пустым (это воля пользователя), а хранилище сессии больше не
+     * участвует в обработке правок и не может их ни испортить, ни «вернуть назад».
+     * Если браузер упёрся в лимит Tomcat на число параметров и форма пришла
+     * без строк — просим загрузить файл заново (увеличенный лимит настроен в
+     * application.properties: server.tomcat.max-parameter-count).
      * Замечания («не удалось определить…») пересчитываются по фактическим
      * данным строк, поэтому вписанный вручную номер квартиры снимает проблему.
      */
     private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
-        List<SentForm> sent = readRowsFromRequest(request);
-        List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
         List<ParsedRowForm> fromForm = new ArrayList<>();
-        if (sent.isEmpty()) {
-            if (stored != null && !stored.isEmpty()) {
-                for (StatementImportService.ImportRow r : stored) {
-                    fromForm.add(ParsedRowForm.from(r));
-                }
-            }
-        } else {
-            Map<Integer, StatementImportService.ImportRow> byNo = new LinkedHashMap<>();
-            Map<Integer, StatementImportService.ImportRow> byPosition = new LinkedHashMap<>();
-            if (stored != null) {
-                int pos = 0;
-                for (StatementImportService.ImportRow r : stored) {
-                    byNo.put(r.orderNo(), r);
-                    byPosition.put(++pos, r);
-                }
-            }
-            for (SentForm sf : sent) {
-                ParsedRowForm f = sf.form();
-                StatementImportService.ImportRow saved = f.getOrderNo() != null
-                        ? byNo.get(f.getOrderNo()) : byPosition.get(sf.position());
-                if (saved != null) {
-                    f.fillMissingFrom(saved, sf.sentFields());
-                }
-                fromForm.add(f);
-            }
+        for (ParsedRowForm f : readRowsFromRequest(request)) {
+            fromForm.add(f);
         }
         finishRows(fromForm);
-        // Страховка: сохраняем актуальные правки, чтобы следующий запрос
-        // (даже обрезанный сервером) работал с последней версией таблицы.
-        try {
-            List<StatementImportService.ImportRow> importRows = new ArrayList<>();
-            for (ParsedRowForm f : fromForm) {
-                importRows.add(f.toRow());
-            }
-            rowsStore.save(session.getId(), resolveFileName(null, session), importRows);
-        } catch (RuntimeException ignored) {
-            // страховка не должна ломать основной сценарий
-        }
         return fromForm;
     }
 
@@ -198,14 +164,12 @@ public class ImportController {
     /**
      * Читает строки таблицы из POST-параметров. Поддерживаются оба формата имён:
      * «rows[0].date» (Thymeleaf-шаблон) и «rows[0][date]» (альтернативный), чтобы
-     * форма надёжно разбиралась независимо от мелочей разметки.
-     * Возвращает пары «форма + набор полей, реально присутствующих в запросе»:
-     * отсутствие поля означает обрезанную форму, а пустое значение — правку
-     * пользователя (ячейку очистили руками).
+     * форма надёжно разбиралась независимо от мелочей разметки. Пустое значение
+     * параметра — это то, что пользователь видит в ячейке (в том числе осознанно
+     * очищенная ячейка); ничего ниоткуда не подставляется.
      */
-    private static List<SentForm> readRowsFromRequest(HttpServletRequest request) {
+    private static List<ParsedRowForm> readRowsFromRequest(HttpServletRequest request) {
         Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
-        Map<Integer, Set<String>> sentFields = new LinkedHashMap<>();
         for (Map.Entry<String, String[]> entry : request.getParameterMap().entrySet()) {
             String name = entry.getKey();
             String field;
@@ -227,7 +191,6 @@ public class ImportController {
             String[] values = entry.getValue();
             String value = values == null || values.length == 0 ? "" : values[0];
             ParsedRowForm f = byIndex.computeIfAbsent(index, k -> new ParsedRowForm());
-            sentFields.computeIfAbsent(index, k -> new java.util.HashSet<>()).add(field);
             switch (field) {
                 case "orderNo" -> {
                     if (value != null && !value.isBlank()) {
@@ -249,21 +212,15 @@ public class ImportController {
                 }
             }
         }
-        List<SentForm> result = new ArrayList<>();
-        int fallbackIndex = 0;
+        List<ParsedRowForm> result = new ArrayList<>();
         for (Map.Entry<Integer, ParsedRowForm> e : byIndex.entrySet()) {
             ParsedRowForm f = e.getValue();
-            fallbackIndex++;
             if (isBlankForm(f)) {
                 continue; // полностью пустая строка — пропускаем
             }
-            result.add(new SentForm(f, sentFields.getOrDefault(e.getKey(), Set.of()), fallbackIndex));
+            result.add(f);
         }
         return result;
-    }
-
-    /** Форма строки + имена полей, которые реально пришли в запросе, + позиция в таблице. */
-    private record SentForm(ParsedRowForm form, Set<String> sentFields, int position) {
     }
 
     /**
