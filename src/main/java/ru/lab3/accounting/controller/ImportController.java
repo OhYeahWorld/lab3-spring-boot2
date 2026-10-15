@@ -445,13 +445,16 @@ public class ImportController {
                 }
             }
 
+            // ВАЖНО: typeKnown передаётся как Boolean (TRUE/FALSE/null), а не как
+            // примитивный boolean. Если бы сюда шёл "1".equals(incoming), неотмеченный
+            // тип превращался бы в «списание», и ошибка типа терялась бы при импорте.
             return new StatementImportService.ImportRow(
                     orderNo == null ? 0 : orderNo, parsedDate,
                     parsedDate == null ? null : parsedDate.atTime(parsedTime == null
                             ? java.time.LocalTime.MIDNIGHT : parsedTime),
                     parsedAmount,
                     party == null ? "" : party, purpose == null ? "" : purpose,
-                    "1".equals(incoming), parsedApartment, null);
+                    parsedTypeKnown, parsedApartment, null);
         }
 
         /** Номер квартиры из текстового поля: чистое число либо подсказка «кв. 164», «л/с 134». */
