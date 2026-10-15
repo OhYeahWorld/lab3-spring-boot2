@@ -20,6 +20,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -27,9 +28,6 @@ import java.util.regex.Pattern;
 @Controller
 @RequestMapping("/data/import")
 public class ImportController {
-
-    // (SESSION-ключи зарезервированы; сами строки лежат в ParsedRowsStore)
-    private static final String SESSION_FILE_KEY = "import.fileName";
 
     private final StatementImportService importService;
     private final LedgerService ledgerService;
@@ -134,63 +132,24 @@ public class ImportController {
     }
 
     /**
-     * Собирает строки из POST-параметров формы; если форма пришла без строк
+     * Собирает строки из POST-параметров формы. Если форма пришла без строк
      * (обрезана сервером, открыта в другой вкладке и т.п.) — берёт последний
-     * разбор файла из сессии. Пользовательские правки при этом не теряются:
-     * они всегда есть в параметрах, а сессия служит только подстраховкой.
+     * сохранённый разбор из ParsedRowsStore. Замечания («не удалось определить…»)
+     * пересчитываются по фактическим данным строк, поэтому вписанный вручную
+     * номер квартиры снимает проблему и строка импортируется.
      */
     private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
         List<ParsedRowForm> fromForm = readRowsFromRequest(request);
-        List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
-        if (fromForm.isEmpty() && stored != null && !stored.isEmpty()) {
-            // форма пришла без строк (обрезана сервером / открыта другая вкладка) —
-            // берём последний сохранённый разбор вместе с предыдущими правками
-            return stored.stream().map(ParsedRowForm::from).toList();
-        }
-        // Слияние с сохранённым разбором: если какой-то параметр формы не дошёл
-        // (Tomcat отрезал часть полей), значение берётся из последней сохранённой версии.
-        // Так пользовательские правки (например, вписанные номера квартир) никогда не теряются.
-        if (stored != null && !stored.isEmpty()) {
-            Map<Integer, ParsedRowForm> byIndex = rowsByIndex(fromForm);
-            for (int i = 0; i < stored.size(); i++) {
-                ParsedRowForm form = byIndex.get(i);
-                if (form == null) {
-                    continue;
-                }
-                StatementImportService.ImportRow base = stored.get(i);
-                if (isBlank(form.getDate()) && base.date() != null) {
-                    form.setDate(base.date().toString());
-                }
-                if (isBlank(form.getTime()) && base.executedAt() != null) {
-                    form.setTime(String.format("%02d:%02d",
-                            base.executedAt().getHour(), base.executedAt().getMinute()));
-                }
-                if (isBlank(form.getAmount()) && base.amount() != null) {
-                    form.setAmount(base.amount().toPlainString());
-                }
-                if (isBlank(form.getApartment()) && base.apartment() != null) {
-                    form.setApartment(String.valueOf(base.apartment()));
-                }
-                if (isBlank(form.getParty()) && base.party() != null && !base.party().isBlank()) {
-                    form.setParty(base.party());
-                }
-                if (isBlank(form.getPurpose()) && base.purpose() != null && !base.purpose().isBlank()) {
-                    form.setPurpose(base.purpose());
-                }
-                if (isBlank(form.getIncoming())) {
-                    form.setIncoming(base.incoming() ? "1" : "0");
-                }
+        if (fromForm.isEmpty()) {
+            List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
+            if (stored != null && !stored.isEmpty()) {
+                fromForm = new ArrayList<>(stored.stream().map(ParsedRowForm::from).toList());
             }
         }
-        // Пересчитываем замечания по фактическим данным строк: после ручных правок
-        // старая метка «не удалось определить номер квартиры» должна исчезнуть,
-        // иначе импорт ошибочно пропускает исправленную строку.
-        for (ParsedRowForm f : fromForm) {
-            String problem = StatementImportService.recomputeProblem(f.toRow());
-            f.setProblem(problem == null ? "" : problem);
-        }
-        // страхуемся: обновляем сохранённый разбор актуальными правками из формы,
-        // чтобы следующий запрос (даже обрезанный Tomcat'ом) работал с ними
+        // Пересчёт замечаний выполняется внутри readRowsFromRequest (см. finishRows).
+        finishRows(fromForm);
+        // Страховка: сохраняем актуальные правки, чтобы следующий запрос
+        // (даже обрезанный сервером) работал с последней версией таблицы.
         try {
             List<StatementImportService.ImportRow> importRows = new ArrayList<>();
             for (ParsedRowForm f : fromForm) {
@@ -203,27 +162,9 @@ public class ImportController {
         return fromForm;
     }
 
-    /** Индексация собранных форм по позиции строки в исходной таблице. */
-    private static Map<Integer, ParsedRowForm> rowsByIndex(List<ParsedRowForm> forms) {
-        Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
-        int i = 0;
-        for (ParsedRowForm f : forms) {
-            Integer orderNo = f.getOrderNo();
-            int key = (orderNo != null && orderNo >= 1 && orderNo <= forms.size())
-                    ? orderNo - 1 : i;
-            byIndex.put(key, f);
-            i++;
-        }
-        return byIndex;
-    }
-
     private String resolveFileName(String fromForm, HttpSession session) {
         if (fromForm != null && !fromForm.isBlank()) {
             return fromForm;
-        }
-        Object inSession = session.getAttribute(SESSION_FILE_KEY);
-        if (inSession instanceof String s && !s.isBlank()) {
-            return s;
         }
         return rowsStore.getFileName(session.getId());
     }
@@ -280,19 +221,38 @@ public class ImportController {
             }
         }
         List<ParsedRowForm> result = new ArrayList<>();
-        int index = 0;
         for (ParsedRowForm f : byIndex.values()) {
             if (isBlankForm(f)) {
                 continue; // полностью пустая строка — пропускаем
             }
+            result.add(f);
+        }
+        return result;
+    }
+
+    /**
+     * Нормализует собранные строки: приводит поля к каноническому виду и
+     * пересчитывает замечания по фактическим данным. После ручной правки
+     * (например, вписанного номера квартиры) старая метка «не удалось
+     * определить номер квартиры» снимается, и строка импортируется.
+     */
+    private static void finishRows(List<ParsedRowForm> rows) {
+        int index = 0;
+        for (ParsedRowForm f : rows) {
             if (f.getOrderNo() == null) {
                 f.setOrderNo(++index);
             } else {
                 index = f.getOrderNo();
             }
-            result.add(f);
+            StatementImportService.ImportRow row = f.toRow();
+            f.setDate(row.date() == null ? "" : row.date().toString());
+            f.setTime(row.executedAt() == null ? ""
+                    : "%02d:%02d".formatted(row.executedAt().getHour(), row.executedAt().getMinute()));
+            f.setAmount(row.amount() == null ? "" : row.amount().toPlainString());
+            f.setApartment(row.apartment() == null ? "" : String.valueOf(row.apartment()));
+            String problem = StatementImportService.recomputeProblem(row);
+            f.setProblem(problem == null ? "" : problem);
         }
-        return result;
     }
 
     private static int parseIntOr(String text, int fallback) {
@@ -319,6 +279,14 @@ public class ImportController {
 
     /** Строка таблицы предпросмотра: все поля редактируются прямо на сайте. */
     public static class ParsedRowForm {
+
+        private static final Pattern TIME_HM = Pattern.compile(
+                "^(\\d{1,2})[:.](\\d{2})(?::\\d{2})?$");
+        private static final Pattern APARTMENT_TAIL = Pattern.compile("(\\d{1,4})\\s*$");
+        private static final Pattern APARTMENT_HINT = Pattern.compile(
+                "(?:кв(?:артир)?а?|л[./\\s-]?с[ч.]?|лиц[.\\s-]*(?:счет|счёт))[^0-9а-я]{0,4}(\\d{1,4})",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
         private Integer orderNo;
         private String date = "";
         private String time = "";
@@ -338,7 +306,7 @@ public class ImportController {
             f.amount = row.amount() == null ? "" : row.amount().toPlainString();
             f.party = row.party() == null ? "" : row.party();
             f.purpose = row.purpose() == null ? "" : row.purpose();
-            f.incoming = row.incoming() ? "1" : "0";
+            f.incoming = row.typeKnown() == null ? "" : (row.typeKnown() ? "1" : "0");
             f.apartment = row.apartment() == null ? "" : String.valueOf(row.apartment());
             f.problem = row.problem() == null ? "" : row.problem();
             return f;
@@ -363,86 +331,91 @@ public class ImportController {
         public String getProblem() { return problem; }
         public void setProblem(String problem) { this.problem = problem; }
 
+        /**
+         * Собирает строку данных из полей формы. Поля принимаются в любом
+         * привычном виде: дата «2018-01-15» или «15.01.2018», сумма «4590,22»,
+         * квартира «164», «кв. 164» или «л/с 0000000134». Замечание (problem)
+         * здесь не вычисляется — итоговую проблему определяет
+         * {@link StatementImportService#recomputeProblem}.
+         */
         StatementImportService.ImportRow toRow() {
             LocalDate parsedDate = null;
-            String dateProblem = null;
             if (date != null && !date.isBlank()) {
                 try {
                     // «2018-01-15 05:45:38» — время режем до разбора даты
                     parsedDate = LedgerService.parseDateText(date.trim().split("[ T]")[0]);
-                } catch (RuntimeException ex) {
-                    dateProblem = StatementImportService.PROBLEM_DATE;
+                } catch (RuntimeException ignored) {
+                    // некорректная дата — останется проблемой при пересчёте
                 }
-            } else {
-                dateProblem = StatementImportService.PROBLEM_DATE;
             }
 
             BigDecimal parsedAmount = null;
             if (amount != null && !amount.isBlank()) {
                 try {
                     parsedAmount = LedgerService.parseAmountText(amount);
-                } catch (RuntimeException ex) {
-                    // сумма не разобрана — помечается проблемой ниже
+                } catch (RuntimeException ignored) {
+                    // некорректная сумма — останется проблемой при пересчёте
                 }
             }
 
-            Integer parsedApartment = null;
-            if (apartment != null && !apartment.isBlank()) {
-                String a = apartment.trim();
-                try {
-                    parsedApartment = Integer.parseInt(a);
-                } catch (NumberFormatException ex) {
-                    try {
-                        // допускаем «кв. 164», «л/с 0000000134» и т.п.
-                        java.util.regex.Matcher m = java.util.regex.Pattern
-                                .compile("(\\d{1,4})\\s*$").matcher(a.replaceAll("\\s+", " ").trim());
-                        if (m.find()) {
-                            int v = Integer.parseInt(m.group(1));
-                            if (v > 0 && v < 1000) {
-                                parsedApartment = v;
-                            }
-                        }
-                    } catch (RuntimeException ignored) {
-                        // некорректный номер — останется пустым
+            Integer parsedApartment = parseApartment(apartment);
+
+            // Тип операции: «1» — поступление, «0» — списание, пустое — не выбран.
+            Boolean parsedTypeKnown = "1".equals(incoming) ? Boolean.TRUE
+                    : "0".equals(incoming) ? Boolean.FALSE : null;
+
+            java.time.LocalTime parsedTime = null;
+            if (time != null && !time.isBlank()) {
+                Matcher m = TIME_HM.matcher(time.trim());
+                if (m.matches()) {
+                    int hour = Integer.parseInt(m.group(1));
+                    int minute = Integer.parseInt(m.group(2));
+                    if (hour <= 23 && minute <= 59) {
+                        parsedTime = java.time.LocalTime.of(hour, minute);
                     }
                 }
-            }
-
-            boolean typeKnown = "1".equals(incoming) || "0".equals(incoming);
-
-            String effectiveProblem = null;
-            if (dateProblem != null) {
-                effectiveProblem = dateProblem;
-            } else if (parsedAmount == null) {
-                effectiveProblem = StatementImportService.PROBLEM_AMOUNT;
-            } else if (!typeKnown) {
-                effectiveProblem = StatementImportService.PROBLEM_TYPE;
-            } else if (parsedApartment == null || parsedApartment <= 0) {
-                effectiveProblem = StatementImportService.PROBLEM_APARTMENT;
-            }
-
-            java.time.LocalDateTime executedAt = null;
-            if (parsedDate != null) {
-                int hour = 0;
-                int minute = 0;
-                if (time != null && time.matches("\\d{1,2}:\\d{2}.*")) {
-                    try {
-                        String hm = time.trim();
-                        hour = Integer.parseInt(hm.substring(0, hm.indexOf(':')));
-                        String mm = hm.substring(hm.indexOf(':') + 1).replaceAll("\\D.*$", "");
-                        minute = mm.isEmpty() ? 0 : Integer.parseInt(mm);
-                    } catch (RuntimeException ignored) {
-                        hour = 0;
-                        minute = 0;
-                    }
-                }
-                executedAt = parsedDate.atTime(Math.min(hour, 23), Math.min(minute, 59));
             }
 
             return new StatementImportService.ImportRow(
-                    orderNo == null ? 0 : orderNo, parsedDate, executedAt, parsedAmount,
+                    orderNo == null ? 0 : orderNo, parsedDate,
+                    parsedDate == null ? null : parsedDate.atTime(parsedTime == null
+                            ? java.time.LocalTime.MIDNIGHT : parsedTime),
+                    parsedAmount,
                     party == null ? "" : party, purpose == null ? "" : purpose,
-                    "1".equals(incoming), parsedApartment, effectiveProblem);
+                    "1".equals(incoming), parsedApartment, null);
+        }
+
+        /** Номер квартиры из текстового поля: чистое число либо подсказка «кв. 164», «л/с 134». */
+        private static Integer parseApartment(String text) {
+            if (text == null || text.isBlank()) {
+                return null;
+            }
+            String a = text.replaceAll("\\s+", " ").trim();
+            try {
+                int v = Integer.parseInt(a);
+                return (v > 0 && v < 1000) ? v : null;
+            } catch (NumberFormatException ignored) {
+                // ищем номер по подсказке или в конце строки
+            }
+            Matcher hint = APARTMENT_HINT.matcher(a);
+            Integer fromHint = null;
+            while (hint.find()) {
+                int v = Integer.parseInt(hint.group(1).replaceFirst("^0+(?!$)", ""));
+                if (v > 0 && v < 1000) {
+                    fromHint = v;
+                }
+            }
+            if (fromHint != null) {
+                return fromHint;
+            }
+            Matcher tail = APARTMENT_TAIL.matcher(a);
+            if (tail.find()) {
+                int v = Integer.parseInt(tail.group(1));
+                if (v > 0 && v < 1000) {
+                    return v;
+                }
+            }
+            return null;
         }
     }
 

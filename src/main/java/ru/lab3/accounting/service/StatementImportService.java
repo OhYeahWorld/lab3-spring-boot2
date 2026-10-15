@@ -1,9 +1,11 @@
 package ru.lab3.accounting.service;
 
 import jakarta.annotation.PreDestroy;
-import org.apache.poi.ss.usermodel.CellType;
-import org.apache.poi.ss.usermodel.DateUtil;
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import org.apache.poi.ooxml.util.SAXHelper;
+import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
+import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
 import org.apache.poi.xssf.model.SharedStrings;
 import org.apache.poi.xssf.model.StylesTable;
 import org.apache.poi.xssf.usermodel.XSSFComment;
@@ -19,13 +21,12 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -34,7 +35,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -43,56 +43,67 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Разбор банковской выписки СберБизнес (.xlsx) и импорт операций в базу.
+ * Разбор банковской выписки СберБизнес (.xlsx/.csv) и импорт операций в базу.
  *
- * Парсер устойчив к разным видам файла:
+ * Поддерживаемые виды файла:
  *  1) Таблица операций (лист «ВЫПИСКА ОПЕРАЦИЙ ПО ЛИЦЕВОМУ СЧЕТУ» с колонками
  *     «Дата проводки / Сумма по дебету / Сумма по кредиту / № документа /
- *     Назначение платежа») — основной и самый надёжный формат.
+ *     Назначение платежа») — основной формат;
  *  2) Печатные бланки платёжных поручений (лист «operations», где каждое
- *     поручение занимает ~45 строк) — запасной вариант.
+ *     поручение занимает несколько десятков строк) — запасной вариант;
+ *  3) Простой CSV/TSV с датой в первой колонке.
  *
- * Файл читается потоковым SAX-ридером POI в «сетку» уже отформатированных
- * строк: это позволяет обрабатывать большие выписки без нехватки памяти.
- * Если в файле есть лист с таблицей операций, блоки из остальных листов
- * не разбираются (экономия времени на огромных листах).
+ * Файл читается потоковым SAX-ридером POI в «сетку» отформатированных строк,
+ * поэтому большие выписки не требуют много памяти. Если в файле есть лист с
+ * таблицей операций, блоки из остальных листов не разбираются.
  *
- * Тип операции определяется по факту: наш расчётный счёт (самый частый
- * номер вида 40xxxxxxxxxxxxxxxxx во всей выписке) стоит по КРЕДИТУ у
- * поступлений и по ДЕБЕТУ у списаний. Дополнительно проверяется явное
- * присутствие номера нашего счёта в ячейке соответствующей стороны.
+ * Тип операции определяется по позиции нашего расчётного счёта (самый частый
+ * номер вида 40xxxxxxxxxxxxxxxxx): по КРЕДИТУ — поступление, по ДЕБЕТУ —
+ * списание.
  *
- * Квартира извлекается из назначения платежа по всем распространённым
- * форматам («л/с 164», «ЛС 49», «ЛСЧ 0000000134», «кв. 76», «квартира 12»,
+ * Квартира извлекается из назначения платежа по распространённым форматам
+ * («л/с 164», «ЛС 49», «ЛСЧ 0000000134», «кв. 76», «квартира 12»,
  * «лиц. счет 88»), затем из адреса плательщика («… Д 12 К 2 КВ 164»),
- * затем из последних цифр маски лицевого счёта («МИЧУРИНСКИЙ,38,86»).
+ * затем из хвоста маски лицевого счёта («МИЧУРИНСКИЙ,38,86»).
  *
- * Любую распознанную строку можно исправить прямо на странице предпросмотра
- * перед импортом: номер квартиры, сумму, тип операции, дату.
+ * Любую распознанную строку можно исправить прямо на странице предпросмотра:
+ * дату, время, сумму, тип операции и номер квартиры. Итоговая проблема строки
+ * всегда пересчитывается по фактическим данным ({@link #recomputeProblem}),
+ * поэтому вписанный вручную номер квартиры снимает метку
+ * «не удалось определить номер квартиры» и строка импортируется.
  */
 @Service
 public class StatementImportService {
 
     private static final Pattern DATE_TIME = Pattern.compile(
             "^(\\d{4})-(\\d{1,2})-(\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?");
-    /** Excel-serial даты в диапазоне 1990–2100 годов (на случай, если лист отдаёт сырое число). */
+    /** Excel-serial даты в диапазоне 2000–2100 годов (на случай, если лист отдаёт сырое число). */
     private static final double SERIAL_MIN = 36526d;   // 01.01.2000 ≈ 36526
-    private static final double SERIAL_MAX = 73415.d;  // ~31.12.2100
+    private static final double SERIAL_MAX = 73415d;   // ~31.12.2100
     private static final Pattern ORDER_NO = Pattern.compile(
             "(?:ПЛАТЕЖНОЕ\\s+ПОРУЧЕНИЕ|РЕКВИЗИТЫ)\\s*№?\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
     /** л/с, л.с, ЛС 123, ЛСЧ 0000000111, «л с 164», кв., квартира 76, лиц. счет 88 — берётся последнее совпадение. */
     private static final Pattern APARTMENT_HINT = Pattern.compile(
             "(?:кв(?:артир)?а?|л[./\\s-]?с[./\\sч]*|лиц[.\\s-]*(?:счет|счёт))[^0-9a-zа-я]{0,4}(\\d{1,9})",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    /** Адрес в строке контрагента: «… Д 12 К 2 КВ 164». */
-    private static final Pattern KV_ADDRESS = Pattern.compile(
-            "\\bКВ\\.?\\s*(\\d{1,4})\\b", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     /** Маска лицевого счёта в адресе: «…,38,86» -> квартира 86. */
     private static final Pattern ACCOUNT_MASK_TAIL = Pattern.compile(
             "[,.]\\d{1,3}[,.](\\d{2,3})(?=\\D|$)");
-    /** Все 20-значние номера счетов в тексте (для определения нашего счёта). */
+    /** Все 20-значные номера счетов в тексте (для определения нашего счёта). */
     private static final Pattern ACCOUNT20 = Pattern.compile("\\d{20}");
     private static final Pattern OUR_ACCOUNT_GUESS = Pattern.compile("40\\d{18}");
+    /** Адресный хвост вида «Д 12 К 2 КВ 164»: дом, корпус, квартира. */
+    private static final Pattern ADDRESS_TRIPLE = Pattern.compile(
+            "(?:Д[.\\s]?\\s*(\\d{1,4}))\\s*(?:К[.\\s]?\\s*(\\d{1,3}))?\\s*(?:КВ[.\\s]?\\s*(\\d{1,4}))",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    /** Явные подсказки «л/с N», «лицевой счёт N». */
+    private static final Pattern LS_EXPLICIT = Pattern.compile(
+            "(?:л[/\\s.]?с[\\sч.]*|лиц[.\\s-]*(?:счет|счёт))[^0-9]{0,3}(\\d{1,9})(?![0-9])",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    /** Явная подсказка «кв./квартира N». */
+    private static final Pattern KV_EXPLICIT = Pattern.compile(
+            "(?:кв(?:артир)?а?)[^0-9а-я]{0,3}(\\d{1,4})(?![0-9])",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     public static final String PROBLEM_DATE = "не удалось определить дату операции";
     public static final String PROBLEM_AMOUNT = "не удалось определить сумму";
@@ -129,10 +140,19 @@ public class StatementImportService {
 
     // ==================== модель данных ====================
 
-    /** Одна операция выписки после разбора (или с описанием проблемы). */
+    /**
+     * Одна операция выписки после разбора (или с описанием проблемы).
+     * {@code typeKnown}: TRUE — поступление, FALSE — списание, null — тип
+     * не определён (пользователь должен выбрать его в предпросмотре).
+     */
     public record ImportRow(int orderNo, LocalDate date, LocalDateTime executedAt, BigDecimal amount,
-                            String party, String purpose, boolean incoming, Integer apartment,
+                            String party, String purpose, Boolean typeKnown, Integer apartment,
                             String problem) {
+
+        /** Поступление ли это (неизвестный тип трактуется как «нет»). */
+        public boolean incoming() {
+            return Boolean.TRUE.equals(typeKnown);
+        }
 
         public String timeText() {
             if (executedAt == null) {
@@ -141,32 +161,30 @@ public class StatementImportService {
             return "%02d:%02d".formatted(executedAt.getHour(), executedAt.getMinute());
         }
 
-        /** Копия с другой квартирой; проблема «нет номера квартиры» снимается. */
+        public ImportRow withOrderNo(int newOrderNo) {
+            return new ImportRow(newOrderNo, date, executedAt, amount, party, purpose,
+                    typeKnown, apartment, problem);
+        }
+
         public ImportRow withApartment(Integer newApartment) {
-            String fixedProblem = PROBLEM_APARTMENT.equals(problem) && newApartment != null ? null : problem;
             return new ImportRow(orderNo, date, executedAt, amount, party, purpose,
-                    incoming, newApartment, fixedProblem);
+                    typeKnown, newApartment, problem);
         }
 
-        /** Копия с другой суммой; проблема «нет суммы» снимается. */
         public ImportRow withAmount(BigDecimal newAmount) {
-            String fixedProblem = PROBLEM_AMOUNT.equals(problem) && newAmount != null ? null : problem;
             return new ImportRow(orderNo, date, executedAt, newAmount, party, purpose,
-                    incoming, apartment, fixedProblem);
+                    typeKnown, apartment, problem);
         }
 
-        /** Копия с другим типом операции. */
-        public ImportRow withIncoming(boolean newIncoming) {
+        public ImportRow withType(Boolean newTypeKnown) {
             return new ImportRow(orderNo, date, executedAt, amount, party, purpose,
-                    newIncoming, apartment, problem);
+                    newTypeKnown, apartment, problem);
         }
 
-        /** Копия с другой датой; проблема «нет даты» снимается. */
         public ImportRow withDate(LocalDate newDate) {
-            String fixedProblem = PROBLEM_DATE.equals(problem) && newDate != null ? null : problem;
             LocalDateTime newTime = newDate == null ? executedAt : newDate.atStartOfDay();
             return new ImportRow(orderNo, newDate, newTime, amount, party, purpose,
-                    incoming, apartment, fixedProblem);
+                    typeKnown, apartment, problem);
         }
     }
 
@@ -181,7 +199,7 @@ public class StatementImportService {
         String name = Optional.ofNullable(file.getOriginalFilename()).orElse("").toLowerCase(Locale.ROOT);
         byte[] content = file.getBytes();
         if (name.endsWith(".csv") || looksLikeCsv(content)) {
-            return deduplicate(parseCsv(new String(content, java.nio.charset.StandardCharsets.UTF_8)));
+            return renumber(parseCsv(new String(content, StandardCharsets.UTF_8)));
         }
         List<List<String[]>> sheets = readWorkbook(content);
 
@@ -191,7 +209,7 @@ public class StatementImportService {
             tableRows.addAll(parseOperationTable(grid));
         }
         if (!tableRows.isEmpty()) {
-            return deduplicate(deduplicateTableRows(tableRows));
+            return renumber(deduplicateExact(tableRows));
         }
         // Таблицы нет — разбираем печатные бланки поручений.
         List<ImportRow> blockRows = new ArrayList<>();
@@ -199,28 +217,38 @@ public class StatementImportService {
             blockRows.addAll(parseBlocks(grid));
         }
         if (!blockRows.isEmpty()) {
-            return deduplicate(blockRows);
+            return renumber(blockRows);
         }
         throw new IllegalArgumentException(
                 "в файле нет ни таблицы операций («Дата проводки / Сумма по дебету / Сумма по кредиту»), "
                         + "ни блоков платёжных поручений («ПЛАТЕЖНОЕ ПОРУЧЕНИЕ № …»).");
     }
 
-    private List<ImportRow> deduplicate(List<ImportRow> rows) {
+    /**
+     * Убирает только полные дубликаты одной и той же операции (дата+время,
+     * контрагент, сумма, тип), возникшие из-за повторного чтения одного листа.
+     * Разные платежи одного лица в один день остаются — они не дубликаты.
+     */
+    private List<ImportRow> deduplicateExact(List<ImportRow> rows) {
         List<ImportRow> unique = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        int order = 0;
         for (ImportRow r : rows) {
-            if (r.problem() == null) {
-                String key = r.orderNo() + "|" + r.date() + "|" + r.amount() + "|" + r.incoming();
-                if (!seen.add(key)) {
-                    continue; // точный дубль одной и той же операции из разных листов
-                }
+            String key = r.executedAt() + "|" + r.party() + "|" + r.amount() + "|" + r.typeKnown();
+            if (seen.add(key)) {
+                unique.add(r);
             }
-            unique.add(new ImportRow(++order, r.date(), r.executedAt(), r.amount(),
-                    r.party(), r.purpose(), r.incoming(), r.apartment(), r.problem()));
         }
         return unique;
+    }
+
+    /** Последовательная нумерация строк предпросмотра. */
+    private static List<ImportRow> renumber(List<ImportRow> rows) {
+        List<ImportRow> result = new ArrayList<>(rows.size());
+        int order = 0;
+        for (ImportRow r : rows) {
+            result.add(r.withOrderNo(++order));
+        }
+        return result;
     }
 
     // ==================== чтение .xlsx (SAX, потоково) ====================
@@ -247,25 +275,21 @@ public class StatementImportService {
             }
             throw new IOException(cause.getMessage() == null ? cause.getClass().getSimpleName()
                     : cause.getMessage(), cause);
-        } finally {
-            synchronized (this) { /* executor переиспользуется */ }
         }
     }
 
     private List<List<String[]>> loadSheets(byte[] content) throws Exception {
         List<List<String[]>> sheets = new ArrayList<>();
-        try (org.apache.poi.openxml4j.opc.OPCPackage pkg =
-                     org.apache.poi.openxml4j.opc.OPCPackage.open(new ByteArrayInputStream(content))) {
+        try (OPCPackage pkg = OPCPackage.open(new ByteArrayInputStream(content))) {
             XSSFReader reader = new XSSFReader(pkg);
             SharedStrings strings = reader.getSharedStringsTable();
             StylesTable styles = reader.getStylesTable();
             java.util.Iterator<InputStream> sheetStream = reader.getSheetsData();
-            org.apache.poi.ss.usermodel.DataFormatter formatter =
-                    new org.apache.poi.ss.usermodel.DataFormatter(Locale.forLanguageTag("ru-RU"));
+            DataFormatter formatter = new DataFormatter(Locale.forLanguageTag("ru-RU"));
             while (sheetStream.hasNext()) {
                 List<String[]> grid = new ArrayList<>();
-                org.xml.sax.XMLReader parser = org.apache.poi.ooxml.util.SAXHelper.newXMLReader();
-                parser.setContentHandler(new org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler(
+                org.xml.sax.XMLReader parser = SAXHelper.newXMLReader();
+                parser.setContentHandler(new XSSFSheetXMLHandler(
                         styles, null, strings, new GridCollector(grid), formatter, false));
                 try (InputStream sheet = sheetStream.next()) {
                     parser.parse(new org.xml.sax.InputSource(sheet));
@@ -287,7 +311,7 @@ public class StatementImportService {
 
     /** Колонки находим по подписям заголовков, а не по жёстким индексам. */
     private record TableLayout(int headerRow, int dateCol, int debitAccCol, int creditAccCol,
-                               int debitSumCol, int creditSumCol, int docCol, int purposeCol) {
+                               int debitSumCol, int creditSumCol, int purposeCol) {
     }
 
     private List<ImportRow> parseOperationTable(List<String[]> grid) {
@@ -295,53 +319,50 @@ public class StatementImportService {
         if (layout == null) {
             return List.of();
         }
-        Map<String, Integer> accountCounts = countAccounts(grid);
-        String ourAccount = guessOurAccount(accountCounts);
+        String ourAccount = guessOurAccount(countAccounts(grid));
         List<ImportRow> rows = new ArrayList<>();
         int order = 0;
         for (int r = layout.headerRow() + 1; r < grid.size(); r++) {
-            String dateText = cell(grid, r, layout.dateCol());
-            DateParts dp = parseDateTimeText(dateText);
+            DateParts dp = parseDateTimeText(cell(grid, r, layout.dateCol()));
             if (dp == null) {
                 continue; // служебные/пустые строки между периодами
             }
             BigDecimal debitSum = parseAmount(cell(grid, r, layout.debitSumCol()));
             BigDecimal creditSum = parseAmount(cell(grid, r, layout.creditSumCol()));
-            String debitAcc = cell(grid, r, layout.debitAccCol());
-            String creditAcc = cell(grid, r, layout.creditAccCol());
-            String purpose = trimToEmpty(cell(grid, r, layout.purposeCol()));
-            // номер документа используется только для контекста — строки нумеруются последовательно
+            String debitAcc = nvl(cell(grid, r, layout.debitAccCol()));
+            String creditAcc = nvl(cell(grid, r, layout.creditAccCol()));
+            String purpose = stripBankPrefix(trimToEmpty(cell(grid, r, layout.purposeCol())));
 
-            // Тип: сумма есть только с одной стороны; при сомнении — по позиции нашего счёта.
-            boolean incoming;
+            // Сумма есть только с одной стороны; при сомнении сторону уточняем
+            // по позиции нашего счёта (у поступления он в кредит, у списания — в дебет).
+            Boolean typeKnown;
             BigDecimal amount;
             if (creditSum != null && creditSum.signum() > 0) {
-                incoming = true;
+                typeKnown = true;
                 amount = creditSum;
             } else if (debitSum != null && debitSum.signum() > 0) {
-                incoming = false;
+                typeKnown = false;
                 amount = debitSum;
             } else {
                 rows.add(new ImportRow(++order, dp.date(), dp.dateTime(), null,
-                        "", stripBankPrefix(purpose), true, null, PROBLEM_AMOUNT));
+                        "", purpose, null, null, PROBLEM_AMOUNT));
                 continue;
             }
             if (ourAccount != null) {
                 boolean ourOnDebit = containsAccount(debitAcc, ourAccount);
                 boolean ourOnCredit = containsAccount(creditAcc, ourAccount);
                 if (ourOnCredit && !ourOnDebit) {
-                    incoming = true;
+                    typeKnown = true;
                 } else if (ourOnDebit && !ourOnCredit) {
-                    incoming = false;
+                    typeKnown = false;
                 }
             }
 
-            String accountSide = incoming ? debitAcc : creditAcc;
-            // Ячейка стороны с НАШИМ счётом — это сам наш счёт (бессмысленно),
-            // контрагент и квартира всегда в ПРОТИВОПОЛОЖНОЙ колонке счетов.
-            String counterpartyCell = incoming ? debitAcc : creditAcc;
+            // Контрагент и квартира всегда в ПРОТИВОПОЛОЖНОЙ колонке счетов:
+            // ячейка с нашим счётом содержит лишь реквизиты самого кооператива.
+            String counterpartyCell = typeKnown ? debitAcc : creditAcc;
             String party = extractPartyName(counterpartyCell);
-            Integer apartment = extractApartment(purpose, accountSide + "\n" + counterpartyCell, party);
+            Integer apartment = extractApartment(purpose, counterpartyCell, party);
 
             String problem = null;
             if (amount.signum() <= 0) {
@@ -350,35 +371,9 @@ public class StatementImportService {
                 problem = PROBLEM_APARTMENT;
             }
             rows.add(new ImportRow(++order, dp.date(), dp.dateTime(), amount,
-                    party, stripBankPrefix(purpose), incoming, apartment, problem));
+                    party, purpose, typeKnown, apartment, problem));
         }
         return rows;
-    }
-
-    /**
-     * Дедупликация строк таблицы операций по признакам «дата+время|контрагент|сумма|тип».
-     * В СберБизнес одна и та же операция иногда продублирована в таблице выписки —
-     * такие точные повторы убираем, не трогая реальные повторные платежи одного лица.
-     */
-    private List<ImportRow> deduplicateTableRows(List<ImportRow> rows) {
-        List<ImportRow> unique = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (ImportRow r : rows) {
-            String key = r.executedAt() + "|" + r.party() + "|" + r.amount() + "|" + r.incoming();
-            if (seen.add(key)) {
-                unique.add(r);
-            }
-        }
-        if (unique.size() == rows.size()) {
-            return rows;
-        }
-        List<ImportRow> renumbered = new ArrayList<>();
-        int order = 0;
-        for (ImportRow r : unique) {
-            renumbered.add(new ImportRow(++order, r.date(), r.executedAt(), r.amount(),
-                    r.party(), r.purpose(), r.incoming(), r.apartment(), r.problem()));
-        }
-        return renumbered;
     }
 
     private TableLayout findTableLayout(List<String[]> grid) {
@@ -388,7 +383,6 @@ public class StatementImportService {
             int dateCol = -1;
             int debitSumCol = -1;
             int creditSumCol = -1;
-            int docCol = -1;
             int purposeCol = -1;
             int debitAccCol = -1;
             int creditAccCol = -1;
@@ -407,8 +401,6 @@ public class StatementImportService {
                     debitSumCol = c;
                 } else if (creditSumCol < 0 && t.contains("по кредиту")) {
                     creditSumCol = c;
-                } else if (docCol < 0 && (t.startsWith("№ документа") || t.startsWith("no документа"))) {
-                    docCol = c;
                 } else if (purposeCol < 0 && t.startsWith("назначение")) {
                     purposeCol = c;
                 } else if (debitAccCol < 0 && t.equals("дебет")) {
@@ -425,12 +417,12 @@ public class StatementImportService {
                         if (up == r) {
                             continue;
                         }
-                        String[] upper = grid.get(up);
-                        if (upper == null) {
+                        String[] neighbour = grid.get(up);
+                        if (neighbour == null) {
                             continue;
                         }
-                        for (int c = 0; c < upper.length; c++) {
-                            String t = upper[c] == null ? null : upper[c].trim().toLowerCase(Locale.ROOT);
+                        for (int c = 0; c < neighbour.length; c++) {
+                            String t = neighbour[c] == null ? null : neighbour[c].trim().toLowerCase(Locale.ROOT);
                             if ("дебет".equals(t) && debitAccCol < 0 && isAccountColumnNear(grid, r, c, debitSumCol)) {
                                 debitAccCol = c;
                             } else if ("кредит".equals(t) && creditAccCol < 0 && isAccountColumnNear(grid, r, c, creditSumCol)) {
@@ -446,7 +438,7 @@ public class StatementImportService {
                     creditAccCol = findAccountColumn(grid, r, creditSumCol);
                 }
                 return new TableLayout(r, dateCol, debitAccCol, creditAccCol,
-                        debitSumCol, creditSumCol, docCol, purposeCol);
+                        debitSumCol, creditSumCol, purposeCol);
             }
         }
         return null;
@@ -527,8 +519,7 @@ public class StatementImportService {
         if (starts.size() < 3) {
             return List.of(); // это не лист с поручениями
         }
-        Map<String, Integer> accountCounts = countAccounts(grid);
-        String ourAccount = guessOurAccount(accountCounts);
+        String ourAccount = guessOurAccount(countAccounts(grid));
         if (ourAccount == null) {
             Matcher m = OUR_ACCOUNT_GUESS.matcher(flatten(grid, 300));
             if (m.find()) {
@@ -547,14 +538,13 @@ public class StatementImportService {
                 problem = PROBLEM_DATE;
             } else if (data.amount() == null || data.amount().signum() <= 0) {
                 problem = PROBLEM_AMOUNT;
-            } else if (data.incoming() == null) {
+            } else if (data.typeKnown() == null) {
                 problem = PROBLEM_TYPE;
             } else if (apartment == null) {
                 problem = PROBLEM_APARTMENT;
             }
             rows.add(new ImportRow(++order, data.date(), data.executedAt(), data.amount(),
-                    data.party(), data.purpose(), Boolean.TRUE.equals(data.incoming()),
-                    apartment, problem));
+                    data.party(), data.purpose(), data.typeKnown(), apartment, problem));
         }
         return rows;
     }
@@ -578,7 +568,7 @@ public class StatementImportService {
     }
 
     private record BlockData(LocalDate date, LocalDateTime executedAt, BigDecimal amount,
-                             Boolean incoming, String party, String purpose) {
+                             Boolean typeKnown, String party, String purpose) {
     }
 
     private BlockData readBlock(List<String[]> grid, int start, int end, int prevStart, String ourAccount) {
@@ -618,17 +608,17 @@ public class StatementImportService {
                 break;
             }
         }
-        Boolean incoming = null;
+        Boolean typeKnown = null;
         if (postLabelRow >= 0 && writtenOffLabelRow >= 0) {
             // У поступления метка «Поступ. в банк плат.» стоит НИЖЕ «Списано со сч. плат.»
-            incoming = postLabelRow > writtenOffLabelRow;
+            typeKnown = postLabelRow > writtenOffLabelRow;
         }
 
         BigDecimal amount = null;
         String payer = null;
         String payee = null;
         String purpose = null;
-        Boolean incomingByAccount = null;
+        Boolean typeByAccount = null;
         for (int r = start; r < end; r++) {
             String[] row = grid.get(r);
             if (row == null) {
@@ -651,39 +641,35 @@ public class StatementImportService {
                     purpose = stripPurposePrefix(first);
                 }
             }
-            if (ourAccount != null && incomingByAccount == null
-                    && labelZ != null && labelZ.trim().startsWith("Сч. №") && value29 != null) {
-                if (containsAccount(value29, ourAccount)) {
-                    // наш счёт в поле получателя => списание, в поле плательщика => поступление
-                    Boolean side = labelGroupAbove(grid, r, start);
-                    if (side != null) {
-                        incomingByAccount = side; // true = плательщик (поступление)
-                    }
-                }
+            if (ourAccount != null && typeByAccount == null
+                    && labelZ != null && labelZ.trim().startsWith("Сч. №") && value29 != null
+                    && containsAccount(value29, ourAccount)) {
+                // наш счёт в группе «Плательщик» => поступление, в «Получатель» => списание
+                typeByAccount = labelGroupAbove(grid, r, start);
             }
         }
         if (purpose == null) {
             purpose = "";
         }
-        if (incoming == null) {
-            incoming = incomingByAccount;
+        if (typeKnown == null) {
+            typeKnown = typeByAccount;
         }
-        if (incoming == null && (payer != null || payee != null)) {
+        if (typeKnown == null && (payer != null || payee != null)) {
             String low = (nvl(payee) + " " + nvl(payer)).toLowerCase(Locale.ROOT);
             if (low.contains("кооператив") || low.contains("дубна")) {
-                incoming = payee != null;
+                typeKnown = payee != null;
             }
         }
-        String party = Boolean.TRUE.equals(incoming) ? payer : payee;
+        String party = Boolean.TRUE.equals(typeKnown) ? payer : payee;
         LocalDateTime executedAt = opDate == null ? null
                 : opDate.atTime(opTime == null ? 0 : opTime.getHour(),
                 opTime == null ? 0 : opTime.getMinute(),
                 opTime == null ? 0 : opTime.getSecond());
-        return new BlockData(opDate, executedAt, amount, incoming,
-                party == null ? "" : shortParty(party), purpose);
+        return new BlockData(opDate, executedAt, amount, typeKnown,
+                shortParty(party == null ? "" : party), purpose);
     }
 
-    /** true, если группа реквизитов относится к плательщику, false — к получателю. */
+    /** true, если группа реквизитов относится к плательщику (поступление), false — к получателю. */
     private Boolean labelGroupAbove(List<String[]> grid, int fromRow, int blockStart) {
         for (int r = fromRow; r >= blockStart; r--) {
             String t = cell(grid, r, 1);
@@ -696,20 +682,6 @@ public class StatementImportService {
             }
             if (tl.startsWith("получатель")) {
                 return false;
-            }
-        }
-        return null;
-    }
-
-    private DateParts parseDateAnyCell(List<String[]> grid, int rowIdx) {
-        String[] row = grid.get(rowIdx);
-        if (row == null) {
-            return null;
-        }
-        for (int c = 0; c < Math.min(row.length, 24); c++) {
-            DateParts dp = parseDateTimeText(row[c]);
-            if (dp != null) {
-                return dp;
             }
         }
         return null;
@@ -764,28 +736,26 @@ public class StatementImportService {
     // ==================== разбор CSV ====================
 
     private boolean looksLikeCsv(byte[] content) {
-        String head = new String(content, 0, Math.min(content.length, 4096),
-                java.nio.charset.StandardCharsets.UTF_8).toLowerCase(Locale.ROOT);
+        String head = new String(content, 0, Math.min(content.length, 4096), StandardCharsets.UTF_8)
+                .toLowerCase(Locale.ROOT);
         return head.contains("дата") && (head.contains("назначение") || head.contains("summa")
                 || head.contains("сумма")) && !head.contains("<?xml");
     }
 
     private List<ImportRow> parseCsv(String text) {
         List<ImportRow> rows = new ArrayList<>();
-        String[] lines = text.split("\r?\n");
-        int order = 0;
-        for (String line : lines) {
+        for (String line : text.split("\r?\n")) {
             if (line.isBlank()) {
                 continue;
             }
             String[] parts = line.split("[;\t,]");
-            if (parts.length < 2 || parseDateTimeText(parts[0].trim()) == null) {
+            DateParts dp = parseDateTimeText(parts[0].trim());
+            if (parts.length < 2 || dp == null) {
                 continue; // шапка и служебные строки
             }
-            rows.add(new ImportRow(++order, parseDateTimeText(parts[0].trim()).date(),
-                    parseDateTimeText(parts[0].trim()).dateTime(), null, "",
+            rows.add(new ImportRow(0, dp.date(), dp.dateTime(), null, "",
                     String.join(" ", Arrays.asList(parts).subList(1, parts.length)).trim(),
-                    true, null, PROBLEM_AMOUNT));
+                    null, null, PROBLEM_AMOUNT));
         }
         return rows;
     }
@@ -809,13 +779,13 @@ public class StatementImportService {
                 int hour = m.group(4) == null ? 0 : Integer.parseInt(m.group(4));
                 int minute = m.group(5) == null ? 0 : Integer.parseInt(m.group(5));
                 int second = m.group(6) == null ? 0 : Integer.parseInt(m.group(6));
-                return new DateParts(date, date.atTime(Math.min(hour, 23), Math.min(minute, 59), Math.min(second, 59)));
+                return new DateParts(date, date.atTime(Math.min(hour, 23), Math.min(minute, 59),
+                        Math.min(second, 59)));
             } catch (RuntimeException ex) {
                 return null;
             }
         }
         // Excel serial: «43103.24» или «43103,24» — только если число целиком и в диапазоне лет.
-        // Дата в Excel считается от 00.01.1900 (с фикцией високосного 29.02.1900).
         String num = s.replace(',', '.');
         if (num.matches("\\d{5}(\\.\\d+)?")) {
             try {
@@ -839,13 +809,18 @@ public class StatementImportService {
         }
     }
 
-    /** Номер квартиры из назначения, затем из адреса («КВ N», «Д 12 К 2»), затем из маски лицевых счетов. */
+    /** Номер квартиры: сначала из назначения, затем из реквизитов контрагента. */
     private Integer extractApartment(String purpose, String fallbackText) {
         return extractApartment(purpose, fallbackText, null);
     }
 
+    /**
+     * Квартира ищется по цепочке эвристик: явные подсказки в назначении
+     * (л/с &gt; кв.) → другие числа назначения → адрес контрагента
+     * («КВ 164», «Д 12 К 2», «12-2-24») → маска лицевого счёта в адресе
+     * («…,38,86»). Первая успешная попытка даёт результат.
+     */
     private Integer extractApartment(String purpose, String fallbackText, String partyName) {
-        // Сначала ищем в назначении с приоритетом явных подсказок: л/с > кв. > адресные маски.
         Integer explicit = explicitApartmentHint(purpose);
         if (explicit != null) {
             return explicit;
@@ -876,9 +851,7 @@ public class StatementImportService {
     /**
      * Квартира из строки контрагента вида
      * «ПАО СБЕРБАНК//ИВАНОВ И.И.//326320605993//МОСКВА Г ОСЕННИЙ Б-Р Д 12 К 2 КВ 164//…»:
-     *  - явное «КВ N» / «кв. N» / «квартира N»;
-     *  - адресная маска «ДОМ-КОРПУС-КВАРТИРА» (например «12-2-24»);
-     *  - хвост адреса после ИНН-карты: последние числа «…,38,86».
+     * явное «КВ N», адресная маска «ДОМ-КОРПУС-КВАРТИРА», хвост адреса «…,38,86».
      */
     private Integer apartmentFromParty(String text) {
         if (text == null || text.isBlank()) {
@@ -908,29 +881,6 @@ public class StatementImportService {
         return null;
     }
 
-    private static final Pattern LS_EXPLICIT = Pattern.compile(
-            "(?:л[/\\\\s.]?с[\\\\sч.]*|лиц[.\\\\s-]*(?:счет|счёт))[^0-9]{0,3}(\\d{1,9})(?![0-9])",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern KV_EXPLICIT = Pattern.compile(
-            "(?:кв(?:артир)?а?)[^0-9а-я]{0,3}(\\d{1,4})(?![0-9])",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    /** Адресный хвост вида «Д 12 К 2 КВ 164» или «12-2-24»: дом, корпус, квартира. */
-    private static final Pattern ADDRESS_TRIPLE = Pattern.compile(
-            "(?:Д[.\\\\s]?\\s*(\\d{1,4}))\\s*(?:К[.\\\\s]?\\s*(\\d{1,3}))?\\s*(?:КВ[.\\\\s]?\\s*(\\d{1,4}))",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    /** Чистый номер лицевого счёта: длинные маски типа 0000000134 -> 134. */
-    private Integer normalizeAccountNumber(String digits) {
-        try {
-            int v = Integer.parseInt(digits);
-            if (v <= 0 || v >= 100000) {
-                return null;
-            }
-            return v;
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-    }
-
     /** Явные подсказки: сначала л/с (в т.ч. маска 0000000134), затем «кв./квартира N». */
     private Integer explicitApartmentHint(String text) {
         if (text == null) {
@@ -958,7 +908,17 @@ public class StatementImportService {
         return fromKv;
     }
 
-    /** Квартира из адресного хвоста строки контрагента: «… Д 12 К 2 КВ 164» или «БУЛЬВАР 12-2-24 …». */
+    /** Чистый номер лицевого счёта: длинные маски типа 0000000134 -> 134. */
+    private Integer normalizeAccountNumber(String digits) {
+        try {
+            int v = Integer.parseInt(digits.replaceFirst("^0+(?!$)", ""));
+            return (v > 0 && v < 1000) ? v : null;
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    /** Квартира из адресного хвоста: «… Д 12 К 2 КВ 164» или «ОСЕННИЙ Б-Р 12-2-24». */
     private Integer addressApartment(String text) {
         if (text == null) {
             return null;
@@ -976,7 +936,6 @@ public class StatementImportService {
         if (last != null) {
             return last;
         }
-        // Формат «ОСЕННИЙ Б-Р 12-2-24»: три числа через дефис — дом-корпус-квартира.
         Matcher triple = Pattern.compile("(?<![\\d/.])(\\d{1,4})-(\\d{1,3})-(\\d{1,4})(?![\\d/.])")
                 .matcher(text.toUpperCase(Locale.ROOT));
         while (triple.find()) {
@@ -988,6 +947,7 @@ public class StatementImportService {
         return last;
     }
 
+    /** Последнее совпадение общей подсказки («л/с N», «кв. N», «лиц. счет N») с маской 0000000134 -> 134. */
     private Integer lastApartmentMatch(String text) {
         if (text == null) {
             return null;
@@ -995,26 +955,9 @@ public class StatementImportService {
         Integer last = null;
         Matcher m = APARTMENT_HINT.matcher(text);
         while (m.find()) {
-            // маска лицевого счёта «0000000134» -> значимые цифры 134
-            String digits = m.group(1).replaceFirst("^0+(?!$)", "");
-            int value = Integer.parseInt(digits);
-            if (value > 0 && value < 1000) {
-                last = value;
-            }
-        }
-        return last;
-    }
-
-    private Integer lastKvAddressMatch(String text) {
-        if (text == null) {
-            return null;
-        }
-        Integer last = null;
-        Matcher m = KV_ADDRESS.matcher(text);
-        while (m.find()) {
-            int value = Integer.parseInt(m.group(1));
-            if (value > 0 && value < 1000) {
-                last = value;
+            Integer v = normalizeAccountNumber(m.group(1));
+            if (v != null) {
+                last = v;
             }
         }
         return last;
@@ -1115,7 +1058,7 @@ public class StatementImportService {
         return sb.toString();
     }
 
-    private String nvl(String s) {
+    private static String nvl(String s) {
         return s == null ? "" : s;
     }
 
@@ -1125,7 +1068,7 @@ public class StatementImportService {
 
     /** SAX-коллектор: собирает лист в «сетку» уже отформатированных текстовых значений. */
     private static final class GridCollector
-            implements org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler.SheetContentsHandler {
+            implements XSSFSheetXMLHandler.SheetContentsHandler {
         private final List<String[]> grid;
         private String[] currentRow = new String[0];
 
@@ -1249,6 +1192,9 @@ public class StatementImportService {
         if (row.amount() == null || row.amount().signum() <= 0) {
             return PROBLEM_AMOUNT;
         }
+        if (row.typeKnown() == null) {
+            return PROBLEM_TYPE;
+        }
         if (row.apartment() == null || row.apartment() <= 0) {
             return PROBLEM_APARTMENT;
         }
@@ -1288,6 +1234,6 @@ public class StatementImportService {
 
     private boolean chargeExists(ImportRow row) {
         return chargeRepository.existsByApartmentNumberAndPeriodAndAmount(
-                row.apartment(), row.date(), row.amount());
+                row.apartment(), YearMonth.from(row.date()).atDay(1), row.amount());
     }
 }
