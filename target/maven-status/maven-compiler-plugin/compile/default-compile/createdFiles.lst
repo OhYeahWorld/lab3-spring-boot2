@@ -1,7 +1,9 @@
 ru/lab3/accounting/AccountingApplication.class
+ru/lab3/accounting/service/ParsedRowsStore$Entry.class
 ru/lab3/accounting/service/StatementImportService$GridCollector.class
 ru/lab3/accounting/controller/DataController.class
 ru/lab3/accounting/config/DatabaseInitializer.class
+ru/lab3/accounting/service/ParsedRowsStore.class
 ru/lab3/accounting/repository/ReportRepository.class
 ru/lab3/accounting/service/StatementImportService$BlockData.class
 ru/lab3/accounting/service/StatementImportService$ImportResult.class

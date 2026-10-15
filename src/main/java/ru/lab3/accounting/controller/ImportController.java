@@ -1,15 +1,18 @@
 package ru.lab3.accounting.controller;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 import ru.lab3.accounting.service.LedgerService;
+import ru.lab3.accounting.service.ParsedRowsStore;
 import ru.lab3.accounting.service.StatementImportService;
 
 import java.math.BigDecimal;
@@ -25,12 +28,18 @@ import java.util.regex.Pattern;
 @RequestMapping("/data/import")
 public class ImportController {
 
+    // (SESSION-ключи зарезервированы; сами строки лежат в ParsedRowsStore)
+    private static final String SESSION_FILE_KEY = "import.fileName";
+
     private final StatementImportService importService;
     private final LedgerService ledgerService;
+    private final ParsedRowsStore rowsStore;
 
-    public ImportController(StatementImportService importService, LedgerService ledgerService) {
+    public ImportController(StatementImportService importService, LedgerService ledgerService,
+                            ParsedRowsStore rowsStore) {
         this.importService = importService;
         this.ledgerService = ledgerService;
+        this.rowsStore = rowsStore;
     }
 
     @GetMapping
@@ -42,14 +51,29 @@ public class ImportController {
     }
 
     @PostMapping("/parse")
-    public String parse(@RequestParam("file") MultipartFile file, Model model) {
+    public String parse(@RequestParam("file") MultipartFile file,
+                        HttpSession session,
+                        Model model) {
         try {
-            List<ParsedRowForm> rows = importService.parse(file).stream()
-                    .map(ParsedRowForm::from)
-                    .toList();
+            if (file == null || file.isEmpty()) {
+                throw new IllegalArgumentException("файл пуст — выберите выписку ещё раз.");
+            }
+            List<StatementImportService.ImportRow> parsed = importService.parse(file);
+            if (parsed.isEmpty()) {
+                throw new IllegalArgumentException("в файле не найдено ни одной операции.");
+            }
+            List<ParsedRowForm> rows = parsed.stream().map(ParsedRowForm::from).toList();
+            // страхуемся: строки также хранятся в сессии — если POST-форма когда-нибудь
+            // придёт обрезанной, «Сохранить правки» и «Импортировать» всё равно сработают
+            rowsStore.save(session.getId(), file.getOriginalFilename(), parsed);
             model.addAttribute("parsedRows", rows);
             model.addAttribute("summary", summarize(rows));
             model.addAttribute("fileName", file.getOriginalFilename());
+            model.addAttribute("notice", "Файл разобран: %d операций. При необходимости отредактируйте "
+                    .formatted(rows.size()) + "строки и нажмите «Импортировать в базу».");
+        } catch (MaxUploadSizeExceededException ex) {
+            model.addAttribute("error", "Файл слишком большой (лимит 20 МБ).");
+            model.addAttribute("parsedRows", List.of());
         } catch (Exception ex) {
             model.addAttribute("error", "Не удалось разобрать выписку: " + friendly(ex));
             model.addAttribute("parsedRows", List.of());
@@ -60,9 +84,10 @@ public class ImportController {
     /** Правка строк предпросмотра прямо на сайте — без импорта в базу. */
     @PostMapping("/edit")
     public String edit(HttpServletRequest request,
+                       HttpSession session,
                        @RequestParam(value = "fileName", required = false) String fileName,
                        Model model) {
-        List<ParsedRowForm> safe = readRowsFromRequest(request);
+        List<ParsedRowForm> safe = collectRows(request, session);
         if (safe.isEmpty()) {
             model.addAttribute("error", "Нет данных для редактирования — сначала загрузите файл.");
             model.addAttribute("parsedRows", List.of());
@@ -70,18 +95,19 @@ public class ImportController {
         }
         model.addAttribute("parsedRows", safe);
         model.addAttribute("summary", summarize(safe));
-        model.addAttribute("fileName", fileName == null ? "" : fileName);
+        model.addAttribute("fileName", resolveFileName(fileName, session));
         model.addAttribute("notice", "Правки сохранены в таблице. Проверьте данные и нажмите «Импортировать в базу».");
         return page(model);
     }
 
     @PostMapping("/commit")
     public String commit(HttpServletRequest request,
+                         HttpSession session,
                          Model model,
                          RedirectAttributes ra) {
-        List<ParsedRowForm> safe = readRowsFromRequest(request);
+        List<ParsedRowForm> safe = collectRows(request, session);
         if (safe.isEmpty()) {
-            // Форма пришла без строк — показываем подсказку вместо пустого редиректа.
+            // Форма пришла без строк и в сессии пусто — просим загрузить файл заново.
             model.addAttribute("parsedRows", List.of());
             model.addAttribute("error", "Не удалось прочитать строки таблицы. "
                     + "Проверьте данные и попробуйте ещё раз, либо загрузите файл заново.");
@@ -100,11 +126,41 @@ public class ImportController {
                 ra.addFlashAttribute("error", "Пропущенные строки: "
                         + String.join("; ", result.problems().subList(0, Math.min(20, result.problems().size()))));
             }
+            rowsStore.remove(session.getId()); // импорт выполнен — страховочные данные больше не нужны
             ra.addFlashAttribute("success", msg.toString());
         } catch (RuntimeException ex) {
             ra.addFlashAttribute("error", "Ошибка импорта: " + friendly(ex));
         }
         return "redirect:/data/import";
+    }
+
+    /**
+     * Собирает строки из POST-параметров формы; если форма пришла без строк
+     * (обрезана сервером, открыта в другой вкладке и т.п.) — берёт последний
+     * разбор файла из сессии. Пользовательские правки при этом не теряются:
+     * они всегда есть в параметрах, а сессия служит только подстраховкой.
+     */
+    private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
+        List<ParsedRowForm> fromForm = readRowsFromRequest(request);
+        if (!fromForm.isEmpty()) {
+            return fromForm;
+        }
+        List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
+        if (stored != null && !stored.isEmpty()) {
+            return stored.stream().map(ParsedRowForm::from).toList();
+        }
+        return List.of();
+    }
+
+    private String resolveFileName(String fromForm, HttpSession session) {
+        if (fromForm != null && !fromForm.isBlank()) {
+            return fromForm;
+        }
+        Object inSession = session.getAttribute(SESSION_FILE_KEY);
+        if (inSession instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        return rowsStore.getFileName(session.getId());
     }
 
     private static final Pattern ROW_INDEX_PATTERN = Pattern.compile("^rows\\[(\\d+)\\]\\.(\\w+)$");

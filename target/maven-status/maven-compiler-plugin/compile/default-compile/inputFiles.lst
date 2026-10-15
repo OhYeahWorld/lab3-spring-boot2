@@ -25,4 +25,5 @@
 /workspace/src/main/java/ru/lab3/accounting/repository/report/TurnoverCell.java
 /workspace/src/main/java/ru/lab3/accounting/repository/report/TurnoverRow.java
 /workspace/src/main/java/ru/lab3/accounting/service/LedgerService.java
+/workspace/src/main/java/ru/lab3/accounting/service/ParsedRowsStore.java
 /workspace/src/main/java/ru/lab3/accounting/service/StatementImportService.java
