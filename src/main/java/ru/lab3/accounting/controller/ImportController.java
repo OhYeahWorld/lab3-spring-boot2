@@ -22,7 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,8 +61,7 @@ public class ImportController {
                 throw new IllegalArgumentException("в файле не найдено ни одной операции.");
             }
             List<ParsedRowForm> rows = parsed.stream().map(ParsedRowForm::from).toList();
-            // страхуемся: строки также хранятся в сессии — если POST-форма когда-нибудь
-            // придёт обрезанной, «Сохранить правки» и «Импортировать» всё равно сработают
+            // Имя файла нужно для отображения после сохранения правок.
             rowsStore.save(session.getId(), file.getOriginalFilename(), parsed);
             model.addAttribute("parsedRows", rows);
             model.addAttribute("summary", summarize(rows));
@@ -86,7 +84,7 @@ public class ImportController {
                        HttpSession session,
                        @RequestParam(value = "fileName", required = false) String fileName,
                        Model model) {
-        List<ParsedRowForm> safe = collectRows(request, session);
+        List<ParsedRowForm> safe = collectRows(request);
         if (safe.isEmpty()) {
             model.addAttribute("error", "Нет данных для редактирования — сначала загрузите файл.");
             model.addAttribute("parsedRows", List.of());
@@ -104,7 +102,7 @@ public class ImportController {
                          HttpSession session,
                          Model model,
                          RedirectAttributes ra) {
-        List<ParsedRowForm> safe = collectRows(request, session);
+        List<ParsedRowForm> safe = collectRows(request);
         if (safe.isEmpty()) {
             model.addAttribute("error", "Не удалось получить строки: загрузите файл выписки заново "
                     + "(он больше не хранится в этой сессии).");
@@ -124,7 +122,7 @@ public class ImportController {
                 ra.addFlashAttribute("error", "Пропущенные строки: "
                         + String.join("; ", result.problems().subList(0, Math.min(20, result.problems().size()))));
             }
-            rowsStore.remove(session.getId()); // импорт выполнен — страховочные данные больше не нужны
+            rowsStore.remove(session.getId());
             ra.addFlashAttribute("success", msg.toString());
         } catch (RuntimeException ex) {
             ra.addFlashAttribute("error", "Ошибка импорта: " + friendly(ex));
@@ -133,57 +131,13 @@ public class ImportController {
     }
 
     /**
-     * Собирает строки из POST-параметров формы. Если форма пришла без строк
-     * (обрезана сервером, открыта в другой вкладке и т.п.) — берёт последний
-     * сохранённый разбор из ParsedRowsStore. Поле, которое вообще не дошло в
-     * запросе, доливается из сохранённой строки; поле, присланное пустым, —
-     * это осознанная правка пользователя (ячейку очистили), его не подменяем.
-     * Замечания («не удалось определить…») пересчитываются по фактическим
-     * данным строк, поэтому вписанный вручную номер квартиры снимает проблему.
+     * Собирает и нормализует строки только из отправленной формы. Сохранённые
+     * в сессии строки не должны подменять пустые или удалённые пользователем ячейки.
      */
-    private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
-        List<SentForm> sent = readRowsFromRequest(request);
-        List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
-        List<ParsedRowForm> fromForm = new ArrayList<>();
-        if (sent.isEmpty()) {
-            if (stored != null && !stored.isEmpty()) {
-                for (StatementImportService.ImportRow r : stored) {
-                    fromForm.add(ParsedRowForm.from(r));
-                }
-            }
-        } else {
-            Map<Integer, StatementImportService.ImportRow> byNo = new LinkedHashMap<>();
-            Map<Integer, StatementImportService.ImportRow> byPosition = new LinkedHashMap<>();
-            if (stored != null) {
-                int pos = 0;
-                for (StatementImportService.ImportRow r : stored) {
-                    byNo.put(r.orderNo(), r);
-                    byPosition.put(++pos, r);
-                }
-            }
-            for (SentForm sf : sent) {
-                ParsedRowForm f = sf.form();
-                StatementImportService.ImportRow saved = f.getOrderNo() != null
-                        ? byNo.get(f.getOrderNo()) : byPosition.get(sf.position());
-                if (saved != null) {
-                    f.fillMissingFrom(saved, sf.sentFields());
-                }
-                fromForm.add(f);
-            }
-        }
-        finishRows(fromForm);
-        // Страховка: сохраняем актуальные правки, чтобы следующий запрос
-        // (даже обрезанный сервером) работал с последней версией таблицы.
-        try {
-            List<StatementImportService.ImportRow> importRows = new ArrayList<>();
-            for (ParsedRowForm f : fromForm) {
-                importRows.add(f.toRow());
-            }
-            rowsStore.save(session.getId(), resolveFileName(null, session), importRows);
-        } catch (RuntimeException ignored) {
-            // страховка не должна ломать основной сценарий
-        }
-        return fromForm;
+    private List<ParsedRowForm> collectRows(HttpServletRequest request) {
+        List<ParsedRowForm> rows = readRowsFromRequest(request);
+        finishRows(rows);
+        return rows;
     }
 
     private String resolveFileName(String fromForm, HttpSession session) {
@@ -199,13 +153,11 @@ public class ImportController {
      * Читает строки таблицы из POST-параметров. Поддерживаются оба формата имён:
      * «rows[0].date» (Thymeleaf-шаблон) и «rows[0][date]» (альтернативный), чтобы
      * форма надёжно разбиралась независимо от мелочей разметки.
-     * Возвращает пары «форма + набор полей, реально присутствующих в запросе»:
-     * отсутствие поля означает обрезанную форму, а пустое значение — правку
-     * пользователя (ячейку очистили руками).
+     * Возвращает только строки, переданные формой; полностью пустые строки
+     * пропускаются.
      */
-    private static List<SentForm> readRowsFromRequest(HttpServletRequest request) {
+    private static List<ParsedRowForm> readRowsFromRequest(HttpServletRequest request) {
         Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
-        Map<Integer, Set<String>> sentFields = new LinkedHashMap<>();
         for (Map.Entry<String, String[]> entry : request.getParameterMap().entrySet()) {
             String name = entry.getKey();
             String field;
@@ -227,7 +179,6 @@ public class ImportController {
             String[] values = entry.getValue();
             String value = values == null || values.length == 0 ? "" : values[0];
             ParsedRowForm f = byIndex.computeIfAbsent(index, k -> new ParsedRowForm());
-            sentFields.computeIfAbsent(index, k -> new java.util.HashSet<>()).add(field);
             switch (field) {
                 case "orderNo" -> {
                     if (value != null && !value.isBlank()) {
@@ -249,21 +200,15 @@ public class ImportController {
                 }
             }
         }
-        List<SentForm> result = new ArrayList<>();
-        int fallbackIndex = 0;
+        List<ParsedRowForm> result = new ArrayList<>();
         for (Map.Entry<Integer, ParsedRowForm> e : byIndex.entrySet()) {
             ParsedRowForm f = e.getValue();
-            fallbackIndex++;
             if (isBlankForm(f)) {
                 continue; // полностью пустая строка — пропускаем
             }
-            result.add(new SentForm(f, sentFields.getOrDefault(e.getKey(), Set.of()), fallbackIndex));
+            result.add(f);
         }
         return result;
-    }
-
-    /** Форма строки + имена полей, которые реально пришли в запросе, + позиция в таблице. */
-    private record SentForm(ParsedRowForm form, Set<String> sentFields, int position) {
     }
 
     /**
@@ -346,39 +291,6 @@ public class ImportController {
             f.apartment = row.apartment() == null ? "" : String.valueOf(row.apartment());
             f.problem = row.problem() == null ? "" : row.problem();
             return f;
-        }
-
-        /**
-         * Доливает из сохранённого разбора только те поля, которых вообще не
-         * оказалось в POST-запросе (обрезанная форма). Поля, пришедшие пустыми,
-         * считаются осознанной правкой пользователя и остаются пустыми.
-         */
-        void fillMissingFrom(StatementImportService.ImportRow saved, Set<String> sentFields) {
-            if (!sentFields.contains("date") && isBlank(date)) {
-                date = saved.date() == null ? "" : saved.date().toString();
-            }
-            if (!sentFields.contains("time") && isBlank(time)) {
-                time = saved.executedAt() == null ? ""
-                        : "%02d:%02d".formatted(saved.executedAt().getHour(), saved.executedAt().getMinute());
-            }
-            if (!sentFields.contains("amount") && isBlank(amount)) {
-                amount = saved.amount() == null ? "" : saved.amount().toPlainString();
-            }
-            if (!sentFields.contains("party") && isBlank(party)) {
-                party = saved.party() == null ? "" : saved.party();
-            }
-            if (!sentFields.contains("purpose") && isBlank(purpose)) {
-                purpose = saved.purpose() == null ? "" : saved.purpose();
-            }
-            if (!sentFields.contains("incoming") && isBlank(incoming)) {
-                incoming = saved.typeKnown() == null ? "" : (saved.typeKnown() ? "1" : "0");
-            }
-            if (!sentFields.contains("apartment") && isBlank(apartment)) {
-                apartment = saved.apartment() == null ? "" : String.valueOf(saved.apartment());
-            }
-            if (!sentFields.contains("problem") && isBlank(problem)) {
-                problem = saved.problem() == null ? "" : saved.problem();
-            }
         }
 
         public Integer getOrderNo() { return orderNo; }

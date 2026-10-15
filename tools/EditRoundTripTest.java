@@ -16,8 +16,7 @@ import java.util.List;
  * 1) загрузить файл -> таблица (часть квартир пустая, часть типов «—»)
  * 2) пользователь вписывает квартиры и выбирает тип, жмёт «Сохранить правки»
  * 3) правки НЕ должны потеряться
- * 4) дополнительно: форма пришла обрезанной (пустые apartment/incoming у части строк) —
- *    значения добираются из сохранённого разбора, а не очищаются.
+ * 4) поля, не отправленные формой, не восстанавливаются из сохранённого разбора.
  */
 public class EditRoundTripTest {
 
@@ -41,13 +40,7 @@ public class EditRoundTripTest {
         return v == null ? "" : String.valueOf(v);
     }
 
-    /**
-     * Имитация POST-запроса браузера. При truncateSome у каждой третьей строки
-     * поля incoming/apartment НЕ отправляются вовсе (параметры отсутствуют в
-     * запросе) — так сервер видит обрезанную форму и доливает их из сохранённого
-     * разбора. Пустое значение параметра, наоборот, трактуется как осознанная
-     * правка пользователя и не подменяется.
-     */
+    /** Имитация полного или обрезанного POST-запроса браузера. */
     static MockHttpServletRequest formRequest(MockHttpSession session, List<Cell> cells, boolean truncateSome) {
         MockHttpServletRequest req = new MockHttpServletRequest("POST", "/data/import/edit");
         req.setSession(session);
@@ -113,34 +106,29 @@ public class EditRoundTripTest {
         }
         System.out.println("edit with full form -> all edits preserved (" + after.size() + " rows)");
 
-        // «Сохранить правки» — обрезанная форма (часть полей не дошла)
+        // Поля, отсутствующие в POST, не должны подтягиваться из исходной строки.
         Model m3 = new ConcurrentModel();
         controller.edit(formRequest(session, edited, true), session, "выписка.xlsx", m3);
         List<Cell> after2 = cells((List<?>) m3.getAttribute("parsedRows"));
         for (int i = 0; i < after2.size(); i++) {
-            Cell want = edited.get(i), got = after2.get(i);
-            if (!want.apartment().equals(got.apartment())) {
-                throw new AssertionError("ОБРЕЗАННАЯ ФОРМА: квартира потеряна в строке " + i + ": [" + got.apartment() + "]");
-            }
-            if (!want.incoming().equals(got.incoming())) {
-                throw new AssertionError("ОБРЕЗАННАЯ ФОРМА: тип потерян в строке " + i + ": [" + got.incoming() + "]");
+            Cell got = after2.get(i);
+            if (i % 3 == 2 && (!got.apartment().isEmpty() || !got.incoming().isEmpty())) {
+                throw new AssertionError("ОБРЕЗАННАЯ ФОРМА: отсутствующие поля восстановлены из сессии в строке "
+                        + i + ": apartment=[" + got.apartment() + "], incoming=[" + got.incoming() + "]");
             }
         }
-        System.out.println("edit with truncated form -> edits recovered from store (" + after2.size() + " rows)");
+        System.out.println("edit with truncated form -> absent fields remain empty (" + after2.size() + " rows)");
 
-        // Полностью пустая форма — строки берутся из хранилища с правками
+        // Полностью пустая форма не должна восстанавливаться из сохранённого разбора.
         MockHttpServletRequest emptyReq = new MockHttpServletRequest("POST", "/data/import/edit");
         emptyReq.setSession(session);
         Model m4 = new ConcurrentModel();
         controller.edit(emptyReq, session, "выписка.xlsx", m4);
         List<Cell> after3 = cells((List<?>) m4.getAttribute("parsedRows"));
-        if (after3.size() != edited.size()) throw new AssertionError("пустая форма: размер " + after3.size());
-        for (int i = 0; i < after3.size(); i++) {
-            if (!edited.get(i).apartment().equals(after3.get(i).apartment())) {
-                throw new AssertionError("пустая форма: квартира потеряна в строке " + i);
-            }
+        if (!after3.isEmpty() || m4.getAttribute("error") == null) {
+            throw new AssertionError("пустая форма: ожидалась ошибка без восстановления строк из сессии");
         }
-        System.out.println("empty form -> rows recovered with edits from store");
+        System.out.println("empty form -> rows are not recovered from session");
         System.out.println("ROUNDTRIP OK");
     }
 }
