@@ -141,25 +141,73 @@ public class ImportController {
      */
     private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
         List<ParsedRowForm> fromForm = readRowsFromRequest(request);
-        if (!fromForm.isEmpty()) {
-            // страхуемся: обновляем сохранённый разбор правками из формы, чтобы следующий
-            // запрос (даже обрезанный Tomcat'ом) работал с актуальными данными
-            try {
-                List<StatementImportService.ImportRow> importRows = new ArrayList<>();
-                for (ParsedRowForm f : fromForm) {
-                    importRows.add(f.toRow());
-                }
-                rowsStore.save(session.getId(), resolveFileName(null, session), importRows);
-            } catch (RuntimeException ignored) {
-                // страховка не должна ломать основной сценарий
-            }
-            return fromForm;
-        }
         List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
-        if (stored != null && !stored.isEmpty()) {
+        if (fromForm.isEmpty() && stored != null && !stored.isEmpty()) {
+            // форма пришла без строк (обрезана сервером / открыта другая вкладка) —
+            // берём последний сохранённый разбор вместе с предыдущими правками
             return stored.stream().map(ParsedRowForm::from).toList();
         }
-        return List.of();
+        // Слияние с сохранённым разбором: если какой-то параметр формы не дошёл
+        // (Tomcat отрезал часть полей), значение берётся из последней сохранённой версии.
+        // Так пользовательские правки (например, вписанные номера квартир) никогда не теряются.
+        if (stored != null && !stored.isEmpty()) {
+            Map<Integer, ParsedRowForm> byIndex = rowsByIndex(fromForm);
+            for (int i = 0; i < stored.size(); i++) {
+                ParsedRowForm form = byIndex.get(i);
+                if (form == null) {
+                    continue;
+                }
+                StatementImportService.ImportRow base = stored.get(i);
+                if (isBlank(form.getDate()) && base.date() != null) {
+                    form.setDate(base.date().toString());
+                }
+                if (isBlank(form.getTime()) && base.executedAt() != null) {
+                    form.setTime(String.format("%02d:%02d",
+                            base.executedAt().getHour(), base.executedAt().getMinute()));
+                }
+                if (isBlank(form.getAmount()) && base.amount() != null) {
+                    form.setAmount(base.amount().toPlainString());
+                }
+                if (isBlank(form.getApartment()) && base.apartment() != null) {
+                    form.setApartment(String.valueOf(base.apartment()));
+                }
+                if (isBlank(form.getParty()) && base.party() != null && !base.party().isBlank()) {
+                    form.setParty(base.party());
+                }
+                if (isBlank(form.getPurpose()) && base.purpose() != null && !base.purpose().isBlank()) {
+                    form.setPurpose(base.purpose());
+                }
+                if (isBlank(form.getIncoming())) {
+                    form.setIncoming(base.incoming() ? "1" : "0");
+                }
+            }
+        }
+        // страхуемся: обновляем сохранённый разбор актуальными правками из формы,
+        // чтобы следующий запрос (даже обрезанный Tomcat'ом) работал с ними
+        try {
+            List<StatementImportService.ImportRow> importRows = new ArrayList<>();
+            for (ParsedRowForm f : fromForm) {
+                importRows.add(f.toRow());
+            }
+            rowsStore.save(session.getId(), resolveFileName(null, session), importRows);
+        } catch (RuntimeException ignored) {
+            // страховка не должна ломать основной сценарий
+        }
+        return fromForm;
+    }
+
+    /** Индексация собранных форм по позиции строки в исходной таблице. */
+    private static Map<Integer, ParsedRowForm> rowsByIndex(List<ParsedRowForm> forms) {
+        Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
+        int i = 0;
+        for (ParsedRowForm f : forms) {
+            Integer orderNo = f.getOrderNo();
+            int key = (orderNo != null && orderNo >= 1 && orderNo <= forms.size())
+                    ? orderNo - 1 : i;
+            byIndex.put(key, f);
+            i++;
+        }
+        return byIndex;
     }
 
     private String resolveFileName(String fromForm, HttpSession session) {
@@ -283,8 +331,7 @@ public class ImportController {
             f.amount = row.amount() == null ? "" : row.amount().toPlainString();
             f.party = row.party() == null ? "" : row.party();
             f.purpose = row.purpose() == null ? "" : row.purpose();
-            f.incoming = row.problem() != null && row.date() == null && row.amount() == null
-                    ? "" : (row.incoming() ? "1" : "0");
+            f.incoming = row.incoming() ? "1" : "0";
             f.apartment = row.apartment() == null ? "" : String.valueOf(row.apartment());
             f.problem = row.problem() == null ? "" : row.problem();
             return f;
