@@ -1,6 +1,6 @@
 package ru.lab3.accounting.controller;
 
-import jakarta.servlet.http.HttpSession;
+import jakarta.validation.Valid;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -12,231 +12,223 @@ import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 import ru.lab3.accounting.service.LedgerService;
 import ru.lab3.accounting.service.StatementImportService;
 
-import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Загрузка банковской выписки (Excel): предпросмотр, редактирование распознанных
- * строк (квартира, сумма, тип операции) и импорт в базу. Разобранный список
- * хранится в сессии, поэтому правки можно вносить сколько угодно раз до импорта,
- * а затем корректировать уже внесённые записи на страницах «Платежи»/«Начисления».
- */
 @Controller
 @RequestMapping("/data/import")
 public class ImportController {
 
-    private static final String SESSION_ROWS = "importParsedRows";
-    private static final String SESSION_FILE = "importFileName";
-
     private final StatementImportService importService;
+    private final LedgerService ledgerService;
 
-    public ImportController(StatementImportService importService) {
+    public ImportController(StatementImportService importService, LedgerService ledgerService) {
         this.importService = importService;
+        this.ledgerService = ledgerService;
     }
 
     @GetMapping
-    public String page(Model model, HttpSession session) {
-        @SuppressWarnings("unchecked")
-        List<StatementImportService.ImportRow> rows =
-                (List<StatementImportService.ImportRow>) session.getAttribute(SESSION_ROWS);
-        model.addAttribute("parsedRows", rows == null ? List.of() : rows);
-        model.addAttribute("fileName", session.getAttribute(SESSION_FILE));
+    public String page(Model model) {
+        if (!model.containsAttribute("parsedRows")) {
+            model.addAttribute("parsedRows", List.of());
+        }
         return "data/import";
     }
 
-    @PostMapping("/preview")
-    public String preview(@RequestParam("file") MultipartFile file,
-                          Model model,
-                          HttpSession session,
-                          RedirectAttributes redirectAttributes) {
-        if (file == null || file.isEmpty()) {
-            model.addAttribute("error", "Выберите файл выписки (.xlsx).");
-            model.addAttribute("parsedRows", List.of());
-            return "data/import";
-        }
+    @PostMapping("/parse")
+    public String parse(@RequestParam("file") MultipartFile file, Model model) {
         try {
             List<StatementImportService.ImportRow> rows = importService.parse(file);
-            long broken = rows.stream().filter(r -> r.problem() != null).count();
-            StringBuilder notice = new StringBuilder("Файл разобран: операций — ").append(rows.size())
-                    .append(". Проверьте список: при необходимости исправьте квартиру, сумму или тип операции "
-                            + "прямо в таблице и нажмите «Применить изменения».");
-            if (broken > 0) {
-                notice.append(" Строк с проблемами: ").append(broken)
-                        .append(" — они будут пропущены при импорте.");
-            }
-            session.setAttribute(SESSION_ROWS, rows);
-            session.setAttribute(SESSION_FILE, safeName(file.getOriginalFilename()));
-            model.addAttribute("notice", notice.toString());
-            model.addAttribute("fileName", safeName(file.getOriginalFilename()));
             model.addAttribute("parsedRows", rows);
-        } catch (IOException | IllegalArgumentException ex) {
-            // Ошибку показываем сразу и НЕ сохраняем пустой список: импорт без данных невозможен.
-            session.removeAttribute(SESSION_ROWS);
-            session.removeAttribute(SESSION_FILE);
-            model.addAttribute("error", "Не удалось разобрать файл: " + messageOf(ex));
+            model.addAttribute("summary", summarize(rows));
+            model.addAttribute("fileName", file.getOriginalFilename());
+        } catch (Exception ex) {
+            model.addAttribute("error", "Не удалось разобрать выписку: " + friendly(ex));
             model.addAttribute("parsedRows", List.of());
         }
-        return "data/import";
+        return page(model);
     }
 
-    /** Применение правок из таблицы предпросмотра без записи в базу. */
-    @PostMapping("/apply")
-    public String apply(@RequestParam(value = "apartment", required = false) List<String> apartments,
-                        @RequestParam(value = "amount", required = false) List<String> amounts,
-                        @RequestParam(value = "incoming", required = false) List<String> incomingFlags,
-                        Model model,
-                        HttpSession session) {
-        List<StatementImportService.ImportRow> stored = currentRows(session, model);
-        if (stored == null) return "data/import";
-        List<StatementImportService.ImportRow> edited = applyEdits(stored, apartments, amounts, incomingFlags);
-        session.setAttribute(SESSION_ROWS, edited);
-        model.addAttribute("notice", "Изменения применены к списку. Нажмите «Импортировать», чтобы внести их в базу.");
-        model.addAttribute("fileName", session.getAttribute(SESSION_FILE));
-        model.addAttribute("parsedRows", edited);
-        return "data/import";
-    }
-
-    @PostMapping("/run")
-    public String run(@RequestParam(value = "apartment", required = false) List<String> apartments,
-                      @RequestParam(value = "amount", required = false) List<String> amounts,
-                      @RequestParam(value = "incoming", required = false) List<String> incomingFlags,
-                      HttpSession session,
-                      RedirectAttributes redirectAttributes) {
-        @SuppressWarnings("unchecked")
-        List<StatementImportService.ImportRow> stored =
-                (List<StatementImportService.ImportRow>) session.getAttribute(SESSION_ROWS);
-        if (stored == null || stored.isEmpty()) {
-            redirectAttributes.addFlashAttribute("error",
-                    "Список операций пуст или устарел. Загрузите файл выписки заново.");
+    /** Правка строки предпросмотра прямо на сайте: квартира, сумма, тип, дата. */
+    @PostMapping("/edit")
+    public String edit(@Valid ParsedRowsHolder holder, Model model, RedirectAttributes ra) {
+        if (holder.getRows() == null || holder.getRows().isEmpty()) {
+            ra.addFlashAttribute("error", "Нет данных для редактирования — сначала загрузите файл.");
             return "redirect:/data/import";
         }
-        List<StatementImportService.ImportRow> edited = applyEdits(stored, apartments, amounts, incomingFlags);
-        long validCount = edited.stream().filter(r -> r.problem() == null).count();
-        if (validCount == 0) {
-            redirectAttributes.addFlashAttribute("error",
-                    "Нет ни одной корректной операции для импорта — исправьте строки в предпросмотре.");
+        model.addAttribute("parsedRows", holder.toRows());
+        model.addAttribute("summary", summarize(holder.toRows()));
+        model.addAttribute("fileName", holder.getFileName());
+        return page(model);
+    }
+
+    @PostMapping("/commit")
+    public String commit(@Valid ParsedRowsHolder holder, RedirectAttributes ra) {
+        if (holder.getRows() == null || holder.getRows().isEmpty()) {
+            ra.addFlashAttribute("error", "Нет данных для импорта — сначала загрузите файл.");
             return "redirect:/data/import";
         }
         try {
-            StatementImportService.ImportResult result = importService.importRows(edited);
-            int imported = result.paymentsCreated() + result.chargesCreated();
-            if (imported == 0) {
-                redirectAttributes.addFlashAttribute("error",
-                        "Не удалось импортировать ни одну операцию. Проблемы: " + summarize(result.problems()));
-                return "redirect:/data/import";
-            }
-            StringBuilder message = new StringBuilder("Импорт завершён: добавлено платежей — ")
-                    .append(result.paymentsCreated())
-                    .append(", начислений — ").append(result.chargesCreated())
-                    .append(", создано периодов сальдо — ").append(result.saldoCreated())
-                    .append(". Затронуто квартир: ").append(result.apartments().size())
-                    .append(". Данные видны на страницах «Платежи» и «Начисления».");
+            StatementImportService.ImportResult result = importService.importRows(holder.toRows());
+            StringBuilder msg = new StringBuilder("Импорт завершён: платежей %d, начислений %d, сальдо %d."
+                    .formatted(result.paymentsCreated(), result.chargesCreated(), result.saldoCreated()));
             if (!result.problems().isEmpty()) {
-                message.append(" Пропущено строк с проблемами — ").append(result.problems().size())
-                        .append(": ").append(summarize(result.problems()));
+                msg.append(" Пропущено строк: ").append(result.problems().size()).append('.');
             }
-            session.removeAttribute(SESSION_ROWS);
-            session.removeAttribute(SESSION_FILE);
-            redirectAttributes.addFlashAttribute("success", message.toString());
+            ra.addFlashAttribute("success", msg.toString());
+            if (!result.problems().isEmpty()) {
+                ra.addFlashAttribute("error", "Пропущенные строки: " + String.join("; ", result.problems()));
+            }
         } catch (RuntimeException ex) {
-            redirectAttributes.addFlashAttribute("error", "Импорт не выполнен: " + messageOf(ex));
+            ra.addFlashAttribute("error", "Ошибка импорта: " + friendly(ex));
         }
         return "redirect:/data/import";
     }
 
-    @PostMapping("/clear")
-    public String clear(HttpSession session, RedirectAttributes redirectAttributes) {
-        session.removeAttribute(SESSION_ROWS);
-        session.removeAttribute(SESSION_FILE);
-        redirectAttributes.addFlashAttribute("notice", "Список очищен.");
-        return "redirect:/data/import";
-    }
+    // ==================== форма предпросмотра ====================
 
-    // ================= helpers =================
+    /** Хранит распознанные строки между запросами в скрытых полях формы. */
+    public static class ParsedRowsHolder {
+        private String fileName = "";
+        private List<ParsedRowForm> rows = new ArrayList<>();
 
-    private List<StatementImportService.ImportRow> currentRows(HttpSession session, Model model) {
-        @SuppressWarnings("unchecked")
-        List<StatementImportService.ImportRow> stored =
-                (List<StatementImportService.ImportRow>) session.getAttribute(SESSION_ROWS);
-        if (stored == null || stored.isEmpty()) {
-            model.addAttribute("error", "Список операций пуст. Сначала загрузите файл выписки.");
-            model.addAttribute("parsedRows", List.of());
-            return null;
-        }
-        return stored;
-    }
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+        public List<ParsedRowForm> getRows() { return rows; }
+        public void setRows(List<ParsedRowForm> rows) { this.rows = rows; }
 
-    /** Применяет поля формы (порядок полей совпадает с порядком строк в списке) к сохранённым строкам. */
-    private List<StatementImportService.ImportRow> applyEdits(
-            List<StatementImportService.ImportRow> stored,
-            List<String> apartments, List<String> amounts, List<String> incomingFlags) {
-        List<StatementImportService.ImportRow> result = new ArrayList<>(stored.size());
-        for (int i = 0; i < stored.size(); i++) {
-            StatementImportService.ImportRow row = stored.get(i);
-            Integer apartment = parseInteger(at(apartments, i));
-            BigDecimal amount = parseDecimal(at(amounts, i));
-            boolean incoming = "1".equals(at(incomingFlags, i));
-
-            if (apartment != null && apartment > 0) {
-                row = row.withApartment(apartment);
+        List<StatementImportService.ImportRow> toRows() {
+            List<StatementImportService.ImportRow> result = new ArrayList<>();
+            for (ParsedRowForm f : rows) {
+                result.add(f.toRow());
             }
-            if (amount != null && amount.signum() > 0) {
-                row = row.withAmount(amount);
+            return result;
+        }
+    }
+
+    public static class ParsedRowForm {
+        private Integer orderNo;
+        private String date;
+        private String time = "";
+        private String amount = "";
+        private String party = "";
+        private String purpose = "";
+        private Boolean incoming;
+        private String apartment = "";
+        private String problem = "";
+
+        public Integer getOrderNo() { return orderNo; }
+        public void setOrderNo(Integer orderNo) { this.orderNo = orderNo; }
+        public String getDate() { return date; }
+        public void setDate(String date) { this.date = date; }
+        public String getTime() { return time; }
+        public void setTime(String time) { this.time = time; }
+        public String getAmount() { return amount; }
+        public void setAmount(String amount) { this.amount = amount; }
+        public String getParty() { return party; }
+        public void setParty(String party) { this.party = party; }
+        public String getPurpose() { return purpose; }
+        public void setPurpose(String purpose) { this.purpose = purpose; }
+        public Boolean getIncoming() { return incoming; }
+        public void setIncoming(Boolean incoming) { this.incoming = incoming; }
+        public String getApartment() { return apartment; }
+        public void setApartment(String apartment) { this.apartment = apartment; }
+        public String getProblem() { return problem; }
+        public void setProblem(String problem) { this.problem = problem; }
+
+        StatementImportService.ImportRow toRow() {
+            LocalDate parsedDate = null;
+            String dateProblem = null;
+            if (date != null && !date.isBlank()) {
+                try {
+                    parsedDate = LocalDate.parse(date.trim());
+                } catch (RuntimeException ex) {
+                    dateProblem = StatementImportService.PROBLEM_DATE;
+                }
+            } else {
+                dateProblem = StatementImportService.PROBLEM_DATE;
             }
-            // Тип (поступление/списание) можно переключить только у строки с корректными датой и суммой.
-            if (row.date() != null && row.amount() != null && row.amount().signum() > 0
-                    && row.incoming() != incoming) {
-                row = new StatementImportService.ImportRow(row.orderNo(), row.date(), row.amount(),
-                        row.party(), row.purpose(), incoming, row.apartment(), null);
+            BigDecimal parsedAmount = null;
+            if (amount != null && !amount.isBlank()) {
+                try {
+                    parsedAmount = LedgerService.parseAmountText(amount);
+                } catch (IllegalArgumentException ex) {
+                    // сумма не разобрана — ниже пометим проблемой
+                }
             }
-            result.add(row);
+            Integer parsedApartment = null;
+            if (apartment != null && !apartment.isBlank()) {
+                try {
+                    parsedApartment = Integer.parseInt(apartment.trim());
+                } catch (NumberFormatException ex) {
+                    // некорректный номер — оставим null
+                }
+            }
+            boolean typeKnown = incoming != null;
+            String carriedProblem = (problem == null || problem.isBlank()) ? null : problem;
+
+            String effectiveProblem = null;
+            if (dateProblem != null) {
+                effectiveProblem = dateProblem;
+            } else if (parsedAmount == null) {
+                effectiveProblem = StatementImportService.PROBLEM_AMOUNT;
+            } else if (!typeKnown) {
+                effectiveProblem = StatementImportService.PROBLEM_TYPE;
+            } else if (parsedApartment == null || parsedApartment <= 0) {
+                effectiveProblem = StatementImportService.PROBLEM_APARTMENT;
+            } else {
+                // Пользователь мог исправить проблему вручную; чужие проблемы сохраняем.
+                boolean wasFixable = StatementImportService.PROBLEM_APARTMENT.equals(carriedProblem)
+                        || StatementImportService.PROBLEM_AMOUNT.equals(carriedProblem);
+                if (carriedProblem != null && !wasFixable) {
+                    effectiveProblem = carriedProblem;
+                }
+            }
+
+            java.time.LocalDateTime executedAt = null;
+            if (parsedDate != null) {
+                int hour = 0;
+                int minute = 0;
+                if (time != null && time.matches("\\d{1,2}:\\d{2}.*")) {
+                    try {
+                        String hm = time.trim();
+                        hour = Integer.parseInt(hm.substring(0, hm.indexOf(':')));
+                        minute = Integer.parseInt(hm.substring(hm.indexOf(':') + 1).replaceAll("\\D.*$", ""));
+                    } catch (RuntimeException ignored) {
+                        hour = 0;
+                        minute = 0;
+                    }
+                }
+                executedAt = parsedDate.atTime(Math.min(hour, 23), Math.min(minute, 59));
+            }
+            return new StatementImportService.ImportRow(
+                    orderNo == null ? 0 : orderNo, parsedDate, executedAt, parsedAmount,
+                    party == null ? "" : party, purpose == null ? "" : purpose,
+                    Boolean.TRUE.equals(incoming), parsedApartment, effectiveProblem);
         }
-        return result;
     }
 
-    private static String at(List<String> list, int index) {
-        return list == null || index >= list.size() ? null : list.get(index);
+    // ==================== вспомогательное ====================
+
+    private static String summarize(List<StatementImportService.ImportRow> rows) {
+        long payments = rows.stream().filter(r -> r.problem() == null && r.incoming()).count();
+        long charges = rows.stream().filter(r -> r.problem() == null && !r.incoming()).count();
+        long problems = rows.stream().filter(r -> r.problem() != null).count();
+        return "Всего операций: %d · поступлений: %d · списаний: %d · требуют внимания: %d"
+                .formatted(rows.size(), payments, charges, problems);
     }
 
-    private static Integer parseInteger(String value) {
-        if (value == null || value.isBlank()) return null;
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-    }
-
-    private static BigDecimal parseDecimal(String value) {
-        if (value == null || value.isBlank()) return null;
-        try {
-            return LedgerService.parseAmountText(value);
-        } catch (RuntimeException ex) {
-            return null;
-        }
-    }
-
-    private static String safeName(String name) {
-        if (name == null || name.isBlank()) return "выписка.xlsx";
-        // Имя файла приходит от клиента — вырезаем пути, чтобы не «протащить» их в страницу.
-        String base = name.replace('\\', '/');
-        return base.substring(base.lastIndexOf('/') + 1);
-    }
-
-    private static String summarize(List<String> problems) {
-        if (problems.isEmpty()) return "";
-        String head = problems.subList(0, Math.min(5, problems.size())).stream()
-                .collect(java.util.stream.Collectors.joining("; "));
-        return problems.size() > 5 ? head + "; … всего " + problems.size() : head;
-    }
-
-    private static String messageOf(Throwable ex) {
+    private static String friendly(Throwable ex) {
         Throwable current = ex;
-        while (current.getCause() != null && current.getCause() != current && current.getMessage() == null) {
+        while (current.getCause() != null && current.getMessage() == null) {
             current = current.getCause();
         }
-        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
+        String message = current.getMessage();
+        if (message == null || message.isBlank()) {
+            return current.getClass().getSimpleName();
+        }
+        return message.replaceAll("(?i)^failed to\\s+", "");
     }
 }

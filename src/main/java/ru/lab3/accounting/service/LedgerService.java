@@ -20,8 +20,13 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 @Service
 public class LedgerService {
@@ -74,34 +79,72 @@ public class LedgerService {
 
     /**
      * Гарантирует существование непрерывной цепочки сальдо для квартиры вплоть
-     * до указанного месяца. Недостающие предыдущие периоды создаются автоматически
-     * (с нулевым входящим остатком для самого первого), чтобы начисления и
-     * платежи из выписки можно было вносить без ручного создания сальдо.
+     * до указанного месяца. Недостающие предыдущие периоды создаются автоматически,
+     * чтобы начисления и платежи из выписки можно было вносить без ручного создания
+     * сальдо. Входящее первого созданного периода — 0, если квартира раньше не
+     * встречалась; иначе — входящее самого раннего существующего периода (оно и
+     * есть «нулевое» сальдо лицевому счёту). Все периоды после созданных
+     * пересчитываются, поэтому цепочка остаётся замкнутой.
      */
     @Transactional
     public void ensureSaldoChain(Integer apartment, LocalDate period) {
         List<Saldo> existingRows = saldoRepository.findByApartmentNumberOrderByPeriodAsc(apartment);
-        YearMonth firstNeeded = existingRows.isEmpty()
-                ? YearMonth.from(period)
-                : minMonth(YearMonth.from(existingRows.get(0).getPeriod()), YearMonth.from(period));
-
-        BigDecimal running = existingRows.isEmpty()
-                ? ZERO
-                : normalize(existingRows.get(0).getOpeningBalance());
-
-        LocalDate nextExisting = existingRows.isEmpty()
+        YearMonth firstExisting = existingRows.isEmpty()
                 ? null
-                : existingRows.get(0).getPeriod();
+                : YearMonth.from(existingRows.get(0).getPeriod());
+        YearMonth target = YearMonth.from(period);
 
-        YearMonth cursor = firstNeeded;
-        while (!cursor.isAfter(YearMonth.from(period))) {
+        if (existingRows.isEmpty() || (firstExisting != null && !firstExisting.isAfter(target))) {
+            // Цепочка уже начинается не позже нужного месяца — просто дополняем
+            // недостающие месяцы между последним существующим и целевым.
+            fillGap(apartment, existingRows, target);
+            return;
+        }
+
+        // Цепочка начинается ПОЗЖЕ целевого месяца: вставляем месяцы перед ней.
+        BigDecimal opening = normalize(existingRows.get(0).getOpeningBalance());
+        List<Saldo> created = new ArrayList<>();
+        YearMonth cursor = firstExisting.minusMonths(1);
+        while (!cursor.isBefore(target)) {
+            Saldo saldo = new Saldo();
+            saldo.setApartmentNumber(apartment);
+            saldo.setPeriod(cursor.atDay(1));
+            saldo.setOpeningBalance(opening);
+            saldo.setClosingBalance(calculateClosing(apartment, cursor.atDay(1), opening));
+            saveSafely(saldo, "Не удалось создать промежуточный период сальдо.");
+            created.add(saldo);
+            opening = saldo.getClosingBalance();
+            cursor = cursor.minusMonths(1);
+        }
+        // Первый из созданных (самый ранний месяц) становится нулевым периодом.
+        if (!created.isEmpty()) {
+            Saldo earliest = created.get(created.size() - 1);
+            earliest.setOpeningBalance(ZERO);
+            earliest.setClosingBalance(calculateClosing(apartment, earliest.getPeriod(), ZERO));
+            saveSafely(earliest, "Не удалось сохранить нулевой период сальдо.");
+            recalculateFrom(apartment, earliest.getPeriod());
+        }
+    }
+
+    /** Дополняет недостающие месяцы после последнего существующего (включая целевой). */
+    private void fillGap(Integer apartment, List<Saldo> existingRows, YearMonth target) {
+        YearMonth lastExisting = existingRows.isEmpty()
+                ? null
+                : YearMonth.from(existingRows.get(existingRows.size() - 1).getPeriod());
+        if (lastExisting != null && !lastExisting.isBefore(target)) {
+            return; // целевой период уже есть
+        }
+        BigDecimal running;
+        YearMonth cursor;
+        if (existingRows.isEmpty()) {
+            running = ZERO;
+            cursor = target;
+        } else {
+            running = normalize(existingRows.get(existingRows.size() - 1).getClosingBalance());
+            cursor = lastExisting.plusMonths(1);
+        }
+        while (!cursor.isAfter(target)) {
             LocalDate monthStart = cursor.atDay(1);
-            if (nextExisting != null && nextExisting.equals(monthStart)) {
-                running = normalize(findOpening(existingRows, monthStart));
-                nextExisting = nextExistingPeriod(existingRows, monthStart);
-                cursor = cursor.plusMonths(1);
-                continue;
-            }
             Saldo saldo = new Saldo();
             saldo.setApartmentNumber(apartment);
             saldo.setPeriod(monthStart);
@@ -111,20 +154,6 @@ public class LedgerService {
             running = saldo.getClosingBalance();
             cursor = cursor.plusMonths(1);
         }
-    }
-
-    private static YearMonth minMonth(YearMonth a, YearMonth b) {
-        return a.isBefore(b) ? a : b;
-    }
-
-    private static BigDecimal findOpening(List<Saldo> rows, LocalDate period) {
-        return rows.stream().filter(r -> r.getPeriod().equals(period))
-                .map(Saldo::getOpeningBalance).findFirst().orElse(ZERO);
-    }
-
-    private static LocalDate nextExistingPeriod(List<Saldo> rows, LocalDate after) {
-        return rows.stream().map(Saldo::getPeriod).filter(p -> p.isAfter(after))
-                .min(LocalDate::compareTo).orElse(null);
     }
 
     @Transactional
@@ -292,6 +321,67 @@ public class LedgerService {
     @Transactional
     public void recalculate(Integer apartment, LocalDate period) {
         recalculateFrom(apartment, period);
+    }
+
+    /**
+     * Быстрый пересчёт сразу многих квартир: по одному запросу на таблицу вместо
+     * трёх запросов на каждую строку сальдо. Используется импортом выписки,
+     * где затронуты сотни лицевых счетов за один проход.
+     */
+    @Transactional
+    public void recalculateAll(java.util.Collection<Integer> apartments) {
+        Set<Integer> targets = new LinkedHashSet<>(apartments);
+        if (targets.isEmpty()) {
+            return;
+        }
+        Map<java.time.YearMonth, BigDecimal> chargeTotals = new HashMap<>();
+        for (Object[] t : chargeRepository.sumAmountByApartmentAndPeriod(targets)) {
+            chargeTotals.put(monthKey((LocalDate) t[0]), normalize((BigDecimal) t[1]));
+        }
+        Map<java.time.YearMonth, BigDecimal> paymentTotals = new HashMap<>();
+        for (Object[] t : paymentRepository.sumAmountByApartmentAndPeriod(targets)) {
+            paymentTotals.put(monthKey((LocalDate) t[0]), normalize((BigDecimal) t[1]));
+        }
+
+        List<Saldo> rows = new ArrayList<>(saldoRepository.findByApartmentNumberInOrderByPeriodAsc(new ArrayList<>(targets)));
+        // Пересчёт «на лет» не должен зависеть от порядка обхода — сортируем один раз.
+        rows.sort(Comparator.comparing(Saldo::getApartmentNumber).thenComparing(Saldo::getPeriod));
+
+        List<Saldo> changed = new ArrayList<>();
+        Integer currentApartment = null;
+        Saldo previous = null;
+        for (Saldo row : rows) {
+            if (!row.getApartmentNumber().equals(currentApartment)) {
+                currentApartment = row.getApartmentNumber();
+                previous = null;
+            }
+            BigDecimal opening = previous == null
+                    ? normalize(row.getOpeningBalance())
+                    : normalize(previous.getClosingBalance());
+            java.time.YearMonth key = monthKey(row.getPeriod());
+            BigDecimal closing = opening
+                    .add(chargeTotals.getOrDefault(key, ZERO))
+                    .subtract(paymentTotals.getOrDefault(key, ZERO))
+                    .setScale(2, RoundingMode.HALF_UP);
+            if (opening.compareTo(normalize(row.getOpeningBalance())) != 0
+                    || closing.compareTo(normalize(row.getClosingBalance())) != 0) {
+                row.setOpeningBalance(opening);
+                row.setClosingBalance(closing);
+                changed.add(row);
+            }
+            previous = row;
+        }
+        if (!changed.isEmpty()) {
+            try {
+                saldoRepository.saveAll(changed);
+            } catch (DataIntegrityViolationException ex) {
+                throw new BalanceIntegrityException("Нарушена последовательность сальдо при пересчёте.");
+            }
+        }
+    }
+
+    private static java.time.YearMonth monthKey(LocalDate period) {
+        return java.time.YearMonth.from(period);
     }
 
     private BigDecimal calculateClosing(Integer apartment, LocalDate period, BigDecimal opening) {

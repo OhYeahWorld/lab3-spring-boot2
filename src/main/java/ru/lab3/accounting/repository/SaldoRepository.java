@@ -18,5 +18,7 @@ public interface SaldoRepository extends JpaRepository<Saldo, Long> {
 
     List<Saldo> findByApartmentNumberOrderByPeriodAsc(Integer apartmentNumber);
 
+    List<Saldo> findByApartmentNumberInOrderByPeriodAsc(java.util.Collection<Integer> apartmentNumbers);
+
     long countByApartmentNumber(Integer apartmentNumber);
 }

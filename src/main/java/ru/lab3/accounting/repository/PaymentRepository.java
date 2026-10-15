@@ -22,6 +22,9 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
     @Query("select coalesce(sum(p.amount), 0) from Payment p where p.apartmentNumber = :apartment and p.period = :period")
     BigDecimal sumAmount(@Param("apartment") Integer apartment, @Param("period") LocalDate period);
 
+    @Query("select p.period, sum(p.amount) from Payment p where p.apartmentNumber in :apartments group by p.period")
+    List<Object[]> sumAmountByApartmentAndPeriod(@Param("apartments") java.util.Collection<Integer> apartments);
+
     List<Payment> findByApartmentNumberOrderByPeriodDescIdDesc(Integer apartmentNumber);
 
     List<Payment> findByApartmentNumberAndPeriodBetweenOrderByPeriodAscIdAsc(
