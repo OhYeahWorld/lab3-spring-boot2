@@ -22,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -134,19 +135,42 @@ public class ImportController {
     /**
      * Собирает строки из POST-параметров формы. Если форма пришла без строк
      * (обрезана сервером, открыта в другой вкладке и т.п.) — берёт последний
-     * сохранённый разбор из ParsedRowsStore. Замечания («не удалось определить…»)
-     * пересчитываются по фактическим данным строк, поэтому вписанный вручную
-     * номер квартиры снимает проблему и строка импортируется.
+     * сохранённый разбор из ParsedRowsStore. Поле, которое вообще не дошло в
+     * запросе, доливается из сохранённой строки; поле, присланное пустым, —
+     * это осознанная правка пользователя (ячейку очистили), его не подменяем.
+     * Замечания («не удалось определить…») пересчитываются по фактическим
+     * данным строк, поэтому вписанный вручную номер квартиры снимает проблему.
      */
     private List<ParsedRowForm> collectRows(HttpServletRequest request, HttpSession session) {
-        List<ParsedRowForm> fromForm = readRowsFromRequest(request);
-        if (fromForm.isEmpty()) {
-            List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
+        List<SentForm> sent = readRowsFromRequest(request);
+        List<StatementImportService.ImportRow> stored = rowsStore.get(session.getId());
+        List<ParsedRowForm> fromForm = new ArrayList<>();
+        if (sent.isEmpty()) {
             if (stored != null && !stored.isEmpty()) {
-                fromForm = new ArrayList<>(stored.stream().map(ParsedRowForm::from).toList());
+                for (StatementImportService.ImportRow r : stored) {
+                    fromForm.add(ParsedRowForm.from(r));
+                }
+            }
+        } else {
+            Map<Integer, StatementImportService.ImportRow> byNo = new LinkedHashMap<>();
+            Map<Integer, StatementImportService.ImportRow> byPosition = new LinkedHashMap<>();
+            if (stored != null) {
+                int pos = 0;
+                for (StatementImportService.ImportRow r : stored) {
+                    byNo.put(r.orderNo(), r);
+                    byPosition.put(++pos, r);
+                }
+            }
+            for (SentForm sf : sent) {
+                ParsedRowForm f = sf.form();
+                StatementImportService.ImportRow saved = f.getOrderNo() != null
+                        ? byNo.get(f.getOrderNo()) : byPosition.get(sf.position());
+                if (saved != null) {
+                    f.fillMissingFrom(saved, sf.sentFields());
+                }
+                fromForm.add(f);
             }
         }
-        // Пересчёт замечаний выполняется внутри readRowsFromRequest (см. finishRows).
         finishRows(fromForm);
         // Страховка: сохраняем актуальные правки, чтобы следующий запрос
         // (даже обрезанный сервером) работал с последней версией таблицы.
@@ -175,9 +199,13 @@ public class ImportController {
      * Читает строки таблицы из POST-параметров. Поддерживаются оба формата имён:
      * «rows[0].date» (Thymeleaf-шаблон) и «rows[0][date]» (альтернативный), чтобы
      * форма надёжно разбиралась независимо от мелочей разметки.
+     * Возвращает пары «форма + набор полей, реально присутствующих в запросе»:
+     * отсутствие поля означает обрезанную форму, а пустое значение — правку
+     * пользователя (ячейку очистили руками).
      */
-    private static List<ParsedRowForm> readRowsFromRequest(HttpServletRequest request) {
+    private static List<SentForm> readRowsFromRequest(HttpServletRequest request) {
         Map<Integer, ParsedRowForm> byIndex = new LinkedHashMap<>();
+        Map<Integer, Set<String>> sentFields = new LinkedHashMap<>();
         for (Map.Entry<String, String[]> entry : request.getParameterMap().entrySet()) {
             String name = entry.getKey();
             String field;
@@ -199,6 +227,7 @@ public class ImportController {
             String[] values = entry.getValue();
             String value = values == null || values.length == 0 ? "" : values[0];
             ParsedRowForm f = byIndex.computeIfAbsent(index, k -> new ParsedRowForm());
+            sentFields.computeIfAbsent(index, k -> new java.util.HashSet<>()).add(field);
             switch (field) {
                 case "orderNo" -> {
                     if (value != null && !value.isBlank()) {
@@ -220,14 +249,21 @@ public class ImportController {
                 }
             }
         }
-        List<ParsedRowForm> result = new ArrayList<>();
-        for (ParsedRowForm f : byIndex.values()) {
+        List<SentForm> result = new ArrayList<>();
+        int fallbackIndex = 0;
+        for (Map.Entry<Integer, ParsedRowForm> e : byIndex.entrySet()) {
+            ParsedRowForm f = e.getValue();
+            fallbackIndex++;
             if (isBlankForm(f)) {
                 continue; // полностью пустая строка — пропускаем
             }
-            result.add(f);
+            result.add(new SentForm(f, sentFields.getOrDefault(e.getKey(), Set.of()), fallbackIndex));
         }
         return result;
+    }
+
+    /** Форма строки + имена полей, которые реально пришли в запросе, + позиция в таблице. */
+    private record SentForm(ParsedRowForm form, Set<String> sentFields, int position) {
     }
 
     /**
@@ -310,6 +346,39 @@ public class ImportController {
             f.apartment = row.apartment() == null ? "" : String.valueOf(row.apartment());
             f.problem = row.problem() == null ? "" : row.problem();
             return f;
+        }
+
+        /**
+         * Доливает из сохранённого разбора только те поля, которых вообще не
+         * оказалось в POST-запросе (обрезанная форма). Поля, пришедшие пустыми,
+         * считаются осознанной правкой пользователя и остаются пустыми.
+         */
+        void fillMissingFrom(StatementImportService.ImportRow saved, Set<String> sentFields) {
+            if (!sentFields.contains("date") && isBlank(date)) {
+                date = saved.date() == null ? "" : saved.date().toString();
+            }
+            if (!sentFields.contains("time") && isBlank(time)) {
+                time = saved.executedAt() == null ? ""
+                        : "%02d:%02d".formatted(saved.executedAt().getHour(), saved.executedAt().getMinute());
+            }
+            if (!sentFields.contains("amount") && isBlank(amount)) {
+                amount = saved.amount() == null ? "" : saved.amount().toPlainString();
+            }
+            if (!sentFields.contains("party") && isBlank(party)) {
+                party = saved.party() == null ? "" : saved.party();
+            }
+            if (!sentFields.contains("purpose") && isBlank(purpose)) {
+                purpose = saved.purpose() == null ? "" : saved.purpose();
+            }
+            if (!sentFields.contains("incoming") && isBlank(incoming)) {
+                incoming = saved.typeKnown() == null ? "" : (saved.typeKnown() ? "1" : "0");
+            }
+            if (!sentFields.contains("apartment") && isBlank(apartment)) {
+                apartment = saved.apartment() == null ? "" : String.valueOf(saved.apartment());
+            }
+            if (!sentFields.contains("problem") && isBlank(problem)) {
+                problem = saved.problem() == null ? "" : saved.problem();
+            }
         }
 
         public Integer getOrderNo() { return orderNo; }
