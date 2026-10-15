@@ -87,19 +87,19 @@ public class DatabaseInitializer implements InitializingBean {
      *   данные больше никогда не отклоняли импорт или редактирование.
      */
     private void repairLegacyData() {
-        Integer fixedPeriods = jdbcTemplate.queryForObject("""
+        int fixedPeriods = jdbcTemplate.update("""
                 UPDATE payments
                    SET period = date_trunc('month', payment_time)::date
                  WHERE payment_time::date < period
                     OR payment_time::date >= (period + INTERVAL '1 month')::date
-                """, Integer.class);
-        if (fixedPeriods != null && fixedPeriods > 0) {
+                """);
+        if (fixedPeriods > 0) {
             log.info("Repaired {} legacy payment rows with mismatched period.", fixedPeriods);
         }
 
         // Пересчёт цепочек сальдо делает сервис при первом же изменении данных,
         // но дополнительно чиним очевидный разрыв «исходящее != входящее следующего».
-        Integer repairedChains = jdbcTemplate.queryForObject("""
+        int repairedChains = jdbcTemplate.update("""
                 WITH ordered AS (
                     SELECT id,
                            apartment_number,
@@ -114,9 +114,8 @@ public class DatabaseInitializer implements InitializingBean {
                  WHERE s.id = o.id
                    AND o.next_opening IS NOT NULL
                    AND o.next_opening <> o.closing_balance
-                RETURNING 1
-                """, Integer.class);
-        if (repairedChains != null && repairedChains > 0) {
+                """);
+        if (repairedChains > 0) {
             log.info("Aligned {} broken saldo chain rows to previous closing balance.", repairedChains);
         }
     }

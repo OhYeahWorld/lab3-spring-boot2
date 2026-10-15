@@ -19,11 +19,11 @@ ru/lab3/accounting/dto/ChargeForm.class
 ru/lab3/accounting/service/StatementImportService$DateParts.class
 ru/lab3/accounting/exception/DuplicateRecordException.class
 ru/lab3/accounting/repository/report/TurnoverApartmentView.class
-ru/lab3/accounting/controller/ReportController.class
 ru/lab3/accounting/repository/ChargeRepository.class
+ru/lab3/accounting/controller/ReportController.class
 ru/lab3/accounting/controller/GlobalExceptionHandler.class
-ru/lab3/accounting/service/StatementImportService.class
 ru/lab3/accounting/model/Payment.class
+ru/lab3/accounting/service/StatementImportService.class
 ru/lab3/accounting/repository/SaldoRepository.class
 ru/lab3/accounting/repository/report/DebtorReportRow.class
 ru/lab3/accounting/config/TimeFormat.class
