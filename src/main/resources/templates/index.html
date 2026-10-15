@@ -32,7 +32,7 @@
     <section class="card">
         <div class="card-head"><h2>Правила целостности</h2></div>
         <div class="rules">
-            <div><b>1.</b><span>Дубли отклоняются и на уровне приложения, и ограничениями UNIQUE в БД.</span></div>
+            <div><b>1.</b><span>Ограничений-дублей в БД больше нет: одинаковые платежи из выписки вносятся свободно; сервис отклоняет только повторную загрузку одного и того&#39;же поручения.</span></div>
             <div><b>2.</b><span>Время создания и последнего изменения хранится в каждой записи.</span></div>
             <div><b>3.</b><span>Формула периода: исходящее сальдо = входящее + начисления − платежи.</span></div>
             <div><b>4.</b><span>Входящее сальдо следующего имеющегося периода обязано равняться исходящему предыдущего.</span></div>
@@ -42,6 +42,7 @@
     <section class="grid links">
         <a class="link-card" th:href="@{/reports/turnover}"><span>01</span><b>Оборотная ведомость</b><small>Год × квартира × 12 месяцев</small></a>
         <a class="link-card" th:href="@{/reports/apartment(apartment=1)}"><span>02</span><b>Оборот по квартире</b><small>Начисления и платежи по месяцам</small></a>
+        <a class="link-card" th:href="@{/data/import}"><span>04</span><b>Загрузка выписки Excel</b><small>Платежи и начисления из СберБизнес</small></a>
         <a class="link-card" th:href="@{/reports/debtors}"><span>03</span><b>Должники по категориям</b><small>На указанную дату</small></a>
     </section>
 </main>

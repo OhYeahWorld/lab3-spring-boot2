@@ -8,7 +8,6 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
-import jakarta.persistence.UniqueConstraint;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
@@ -16,8 +15,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 
 @Entity
-@Table(name = "charges", uniqueConstraints = @UniqueConstraint(
-        name = "uq_charge_visible", columnNames = {"apartment_number", "period", "amount"}))
+@Table(name = "charges")
 public class Charge {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -32,7 +30,7 @@ public class Charge {
     @Column(name = "amount", nullable = false, precision = 14, scale = 2)
     private BigDecimal amount;
 
-    @Column(name = "description", nullable = false, length = 255)
+    @Column(name = "description", nullable = false, length = 1000)
     private String description = "";
 
     @Column(name = "created_at", nullable = false)

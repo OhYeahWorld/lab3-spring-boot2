@@ -16,11 +16,11 @@
                 <small class="field-error" th:if="${#fields.hasErrors('apartmentNumber')}" th:errors="*{apartmentNumber}"></small>
             </label>
             <label>Период
-                <input type="month" th:field="*{period}" required>
+                <input type="text" placeholder="2018-01 или январь 2018" th:field="*{period}" required>
                 <small class="field-error" th:if="${#fields.hasErrors('period')}" th:errors="*{period}"></small>
             </label>
             <label>Сумма
-                <input type="number" min="0.01" step="0.01" th:field="*{amount}" required>
+                <input type="text" placeholder="4590,22 или 311-27" th:field="*{amount}" required>
                 <small class="field-error" th:if="${#fields.hasErrors('amount')}" th:errors="*{amount}"></small>
             </label>
             <label class="span-2">Описание

@@ -11,8 +11,7 @@ CREATE TABLE IF NOT EXISTS saldo (
     closing_balance NUMERIC(14,2) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    version BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT uq_saldo_apartment_period UNIQUE (apartment_number, period)
+    version BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS charges (
@@ -20,41 +19,75 @@ CREATE TABLE IF NOT EXISTS charges (
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
     amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
-    description VARCHAR(255) NOT NULL DEFAULT '',
+    description VARCHAR(1000) NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    version BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT uq_charge_natural UNIQUE (apartment_number, period, amount, description)
+    version BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS payments (
     id BIGSERIAL PRIMARY KEY,
     apartment_number INTEGER NOT NULL CHECK (apartment_number > 0),
     period DATE NOT NULL CHECK (period = date_trunc('month', period)::date),
-    payment_date DATE NOT NULL,
+    payment_time TIMESTAMP NOT NULL,
     amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
-    payment_reference VARCHAR(100) NOT NULL,
+    payment_reference VARCHAR(100) NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     version BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT uq_payment_natural UNIQUE (apartment_number, period, payment_date, amount, payment_reference),
     CONSTRAINT chk_payment_date_in_period CHECK (
-        payment_date >= period AND payment_date < (period + INTERVAL '1 month')::date
+        payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
     )
 );
 
--- Помимо технических реквизитов запрещаем одинаковые "видимые" записи.
--- Например, нельзя занести два одинаковых начисления за одну квартиру и месяц,
--- даже если описание отличается.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_charge_visible
-    ON charges(apartment_number, period, amount);
+-- Индексы для ускорения выборок. Уникальность «видимых» реквизитов больше НЕ
+-- ограничивается: в реальной выписки по квартире могут приходить несколько
+-- одинаковых по сумме платежей (например, два платежа по 5000 рублей), и приложение
+-- должно их принимать. Защита от случайного дублирования одного и того же
+-- платежа/начисления остаётся на уровне сервиса (проверка совпадения платёжного
+-- поручения из выписки).
+DROP INDEX IF EXISTS uq_charge_visible;
+CREATE INDEX IF NOT EXISTS ix_charge_visible ON charges(apartment_number, period, amount);
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_visible
-    ON payments(apartment_number, period, payment_date, amount);
+DROP INDEX IF EXISTS uq_payment_visible;
+CREATE INDEX IF NOT EXISTS ix_payment_visible ON payments(apartment_number, period, payment_time, amount);
 
 CREATE INDEX IF NOT EXISTS ix_saldo_apartment_period ON saldo(apartment_number, period);
 CREATE INDEX IF NOT EXISTS ix_charge_apartment_period ON charges(apartment_number, period);
 CREATE INDEX IF NOT EXISTS ix_payment_apartment_period ON payments(apartment_number, period);
+
+-- Миграция для баз, созданных до появления времени платежа:
+-- заменяем payment_date (DATE) на payment_time (TIMESTAMP).
+-- Время платежа берётся из выписки; старые даты переносятся с полуночи.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'payments' AND column_name = 'payment_date')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'payments' AND column_name = 'payment_time') THEN
+        ALTER TABLE payments DROP CONSTRAINT IF EXISTS chk_payment_date_in_period;
+        ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
+        DROP INDEX IF EXISTS uq_payment_visible;
+        UPDATE payments SET payment_date = payment_date + TIME '10:30';
+        ALTER TABLE payments RENAME COLUMN payment_date TO payment_time;
+        ALTER TABLE payments ALTER COLUMN payment_time TYPE TIMESTAMP USING payment_time::timestamp;
+        ALTER TABLE payments ADD CONSTRAINT chk_payment_date_in_period CHECK (
+            payment_time::date >= period AND payment_time::date < (period + INTERVAL '1 month')::date
+        );
+    END IF;
+END $$;
+
+-- Ослабляем старые «жёсткие» ограничения, из-за которых нормальные данные
+-- из банковской выписки отклонялись как «дубликаты».
+ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_natural;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_natural;
+ALTER TABLE charges  DROP CONSTRAINT IF EXISTS uq_charge_visible;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS uq_payment_visible;
+ALTER TABLE saldo    DROP CONSTRAINT IF EXISTS uq_saldo_apartment_period;
+
+-- Для существующих баз: расширяем description и делаем reference необязательным.
+ALTER TABLE charges  ALTER COLUMN description TYPE VARCHAR(1000);
+ALTER TABLE payments ALTER COLUMN payment_reference SET DEFAULT '';
 
 -- Системное время последнего изменения.
 CREATE OR REPLACE FUNCTION set_updated_at()

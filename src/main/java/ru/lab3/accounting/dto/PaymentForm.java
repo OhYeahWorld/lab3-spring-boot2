@@ -1,12 +1,10 @@
 package ru.lab3.accounting.dto;
 
-import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 
-import java.math.BigDecimal;
 
 public class PaymentForm {
     private Long id;
@@ -21,13 +19,11 @@ public class PaymentForm {
     @NotBlank
     private String paymentTime;
 
-    @NotNull
-    @DecimalMin(value = "0.01")
-    private BigDecimal amount;
+    @NotBlank(message = "Укажите сумму, например 4590,22")
+    private String amount;
 
-    @NotBlank
     @Size(max = 100)
-    private String paymentReference;
+    private String paymentReference = "";
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -37,8 +33,8 @@ public class PaymentForm {
     public void setPeriod(String period) { this.period = period; }
     public String getPaymentTime() { return paymentTime; }
     public void setPaymentTime(String paymentTime) { this.paymentTime = paymentTime; }
-    public BigDecimal getAmount() { return amount; }
-    public void setAmount(BigDecimal amount) { this.amount = amount; }
+    public String getAmount() { return amount; }
+    public void setAmount(String amount) { this.amount = amount == null ? null : amount.trim(); }
     public String getPaymentReference() { return paymentReference; }
     public void setPaymentReference(String paymentReference) { this.paymentReference = paymentReference; }
 }

@@ -58,12 +58,8 @@ public class DatabaseInitializer implements InitializingBean {
                                 "(select count(*) from payments)",
                         Integer.class);
 
-                if (businessRows != null && businessRows == 0) {
-                    jdbcTemplate.execute(read("data.sql"));
-                    log.info("Empty database detected: demo data loaded automatically.");
-                } else {
-                    log.info("Database already contains {} business rows: demo data was not added.", businessRows);
-                }
+                log.info("Business tables contain {} rows; nothing is auto-loaded — " +
+                        "all data comes from manual entry or Excel statement import.", businessRows);
 
                 validateBalances();
                 log.info("PostgreSQL schema/data initialization completed successfully (attempt {}).", attempt);
@@ -78,7 +74,7 @@ public class DatabaseInitializer implements InitializingBean {
         }
 
         throw new IllegalStateException(
-                "Не удалось подключиться к PostgreSQL или выполнить schema.sql/data.sql. " +
+                "Не удалось подключиться к PostgreSQL или выполнить schema.sql. " +
                         "Проверьте DB_URL, DB_USER, DB_PASSWORD и запущенный PostgreSQL. Причина: " + rootMessage(last),
                 last);
     }

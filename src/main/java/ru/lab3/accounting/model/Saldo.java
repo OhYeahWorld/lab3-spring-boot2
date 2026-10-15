@@ -8,7 +8,6 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
-import jakarta.persistence.UniqueConstraint;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
@@ -16,8 +15,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 
 @Entity
-@Table(name = "saldo", uniqueConstraints = @UniqueConstraint(
-        name = "uq_saldo_apartment_period", columnNames = {"apartment_number", "period"}))
+@Table(name = "saldo")
 public class Saldo {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
