@@ -191,7 +191,7 @@ public class StatementImportService {
             tableRows.addAll(parseOperationTable(grid));
         }
         if (!tableRows.isEmpty()) {
-            return deduplicate(tableRows);
+            return deduplicate(deduplicateTableRows(tableRows));
         }
         // Таблицы нет — разбираем печатные бланки поручений.
         List<ImportRow> blockRows = new ArrayList<>();
@@ -337,8 +337,11 @@ public class StatementImportService {
             }
 
             String accountSide = incoming ? debitAcc : creditAcc;
-            String party = extractPartyName(accountSide);
-            Integer apartment = extractApartment(purpose, accountSide);
+            // Ячейка стороны с НАШИМ счётом — это сам наш счёт (бессмысленно),
+            // контрагент и квартира всегда в ПРОТИВОПОЛОЖНОЙ колонке счетов.
+            String counterpartyCell = incoming ? debitAcc : creditAcc;
+            String party = extractPartyName(counterpartyCell);
+            Integer apartment = extractApartment(purpose, accountSide + "\n" + counterpartyCell, party);
 
             String problem = null;
             if (amount.signum() <= 0) {
@@ -350,6 +353,32 @@ public class StatementImportService {
                     party, stripBankPrefix(purpose), incoming, apartment, problem));
         }
         return rows;
+    }
+
+    /**
+     * Дедупликация строк таблицы операций по признакам «дата+время|контрагент|сумма|тип».
+     * В СберБизнес одна и та же операция иногда продублирована в таблице выписки —
+     * такие точные повторы убираем, не трогая реальные повторные платежи одного лица.
+     */
+    private List<ImportRow> deduplicateTableRows(List<ImportRow> rows) {
+        List<ImportRow> unique = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ImportRow r : rows) {
+            String key = r.executedAt() + "|" + r.party() + "|" + r.amount() + "|" + r.incoming();
+            if (seen.add(key)) {
+                unique.add(r);
+            }
+        }
+        if (unique.size() == rows.size()) {
+            return rows;
+        }
+        List<ImportRow> renumbered = new ArrayList<>();
+        int order = 0;
+        for (ImportRow r : unique) {
+            renumbered.add(new ImportRow(++order, r.date(), r.executedAt(), r.amount(),
+                    r.party(), r.purpose(), r.incoming(), r.apartment(), r.problem()));
+        }
+        return renumbered;
     }
 
     private TableLayout findTableLayout(List<String[]> grid) {
@@ -389,10 +418,10 @@ public class StatementImportService {
                 }
             }
             if (dateCol >= 0 && (debitSumCol >= 0 || creditSumCol >= 0)) {
-                // Подписи «Дебет»/«Кредит» могут стоять на строку ВЫШЕ заголовков сумм —
-                // ищем их там, если в самой строке заголовка их нет.
+                // Подписи «Дебет»/«Кредит» могут стоять на строку ВЫШЕ или НИЖЕ
+                // заголовков сумм — сканируем соседние строки в обе стороны.
                 if (debitAccCol < 0 || creditAccCol < 0) {
-                    for (int up = Math.max(0, r - 2); up <= r; up++) {
+                    for (int up = Math.max(0, r - 2); up <= Math.min(grid.size() - 1, r + 2); up++) {
                         if (up == r) {
                             continue;
                         }
@@ -786,16 +815,17 @@ public class StatementImportService {
             }
         }
         // Excel serial: «43103.24» или «43103,24» — только если число целиком и в диапазоне лет.
+        // Дата в Excel считается от 00.01.1900 (с фикцией високосного 29.02.1900).
         String num = s.replace(',', '.');
         if (num.matches("\\d{5}(\\.\\d+)?")) {
             try {
                 double serial = Double.parseDouble(num);
                 if (serial >= SERIAL_MIN && serial <= SERIAL_MAX) {
-                    java.time.LocalDate d = org.apache.poi.ss.usermodel.DateUtil
-                            .getDateFromJavaDouble(serial);
-                    long dayPart = (long) (serial % 1 * 86400);
-                    return new DateParts(d, d.atStartOfDay()
-                            .plusSeconds(dayPart / 1000 * 1000));
+                    LocalDate epoch = LocalDate.of(1899, 12, 30);
+                    LocalDate d = epoch.plusDays((long) Math.floor(serial));
+                    long dayMillis = Math.round((serial % 1) * 86_400_000d);
+                    LocalDateTime dt = d.atStartOfDay().plusNanos(dayMillis * 1_000_000L);
+                    return new DateParts(d, dt);
                 }
             } catch (RuntimeException ignored) {
                 return null;
@@ -811,6 +841,10 @@ public class StatementImportService {
 
     /** Номер квартиры из назначения, затем из адреса («КВ N», «Д 12 К 2»), затем из маски лицевых счетов. */
     private Integer extractApartment(String purpose, String fallbackText) {
+        return extractApartment(purpose, fallbackText, null);
+    }
+
+    private Integer extractApartment(String purpose, String fallbackText, String partyName) {
         // Сначала ищем в назначении с приоритетом явных подсказок: л/с > кв. > адресные маски.
         Integer explicit = explicitApartmentHint(purpose);
         if (explicit != null) {
@@ -824,11 +858,54 @@ public class StatementImportService {
         if (fromAddress != null) {
             return fromAddress;
         }
+        Integer fromParty = apartmentFromParty(partyName);
+        if (fromParty != null) {
+            return fromParty;
+        }
         Integer fromFallbackHint = lastApartmentMatch(fallbackText);
         if (fromFallbackHint != null) {
             return fromFallbackHint;
         }
+        Integer fromPartyTail = apartmentFromParty(fallbackText);
+        if (fromPartyTail != null) {
+            return fromPartyTail;
+        }
         return lastMaskTailMatch(fallbackText);
+    }
+
+    /**
+     * Квартира из строки контрагента вида
+     * «ПАО СБЕРБАНК//ИВАНОВ И.И.//326320605993//МОСКВА Г ОСЕННИЙ Б-Р Д 12 К 2 КВ 164//…»:
+     *  - явное «КВ N» / «кв. N» / «квартира N»;
+     *  - адресная маска «ДОМ-КОРПУС-КВАРТИРА» (например «12-2-24»);
+     *  - хвост адреса после ИНН-карты: последние числа «…,38,86».
+     */
+    private Integer apartmentFromParty(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        Integer kv = explicitApartmentHint(text);
+        if (kv != null) {
+            return kv;
+        }
+        Integer triple = addressApartment(text);
+        if (triple != null) {
+            return triple;
+        }
+        // Сегменты после двойного слэша: ищем адресную часть (после длинного номера карты/ИНН).
+        for (String seg : text.split("//")) {
+            String s = seg.trim();
+            if (s.matches("\\d{10,20}")) {
+                continue; // номер карты/счета — не адрес
+            }
+            if (s.matches(".*\\d{1,4}[,.]\\s*\\d{1,4}.*") && !s.matches("\\d+")) {
+                Integer tail = lastMaskTailMatch(s);
+                if (tail != null) {
+                    return tail;
+                }
+            }
+        }
+        return null;
     }
 
     private static final Pattern LS_EXPLICIT = Pattern.compile(
