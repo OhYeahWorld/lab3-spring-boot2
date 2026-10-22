@@ -15,7 +15,8 @@
             <span class="hint" th:text="|В очереди: ${#lists.size(rows)}|">В очереди: 0</span>
         </div>
         <p class="hint">Эти записи не попали в основные данные. Исправьте дату, тип операции, сумму и квартиру,
-            затем нажмите «Сохранить и загрузить корректные». Неразрешённые строки останутся здесь до следующей правки.
+            отметьте галочками строки для загрузки и нажмите «Загрузить отмеченные». Изменения сохраняются и у
+            неотмеченных строк. Неразрешённые строки останутся здесь до следующей правки.
             После успешной загрузки запись удаляется из очереди.</p>
 
         <form th:if="${!#lists.isEmpty(rows)}" th:action="@{/data/import/errors/import}" method="post">
@@ -23,12 +24,16 @@
                 <table>
                     <thead>
                     <tr>
-                        <th>Файл / №</th><th>Дата</th><th>Время</th><th>Тип</th><th>Сумма</th>
+                        <th>В загрузку</th><th>Файл / №</th><th>Дата</th><th>Время</th><th>Тип</th><th>Сумма</th>
                         <th>Квартира</th><th>Контрагент</th><th>Назначение</th><th>Замечание</th>
                     </tr>
                     </thead>
                     <tbody>
                     <tr th:each="row, st : ${rows}">
+                        <td><input type="checkbox" value="1"
+                                   th:name="|rows[${st.index}].selected|"
+                                   th:checked="${row.selected}"
+                                   aria-label="Отметить запись для загрузки"></td>
                         <td>
                             <input type="hidden" th:name="|rows[${st.index}].pendingId|" th:value="${row.pendingId}">
                             <input type="hidden" th:name="|rows[${st.index}].orderNo|" th:value="${row.orderNo}">
@@ -58,8 +63,8 @@
                     Сохранить изменения
                 </button>
                 <button class="button primary" type="submit"
-                        onclick="return confirm('Загрузить все корректные строки в основные данные?');">
-                    Сохранить и загрузить корректные
+                        onclick="return confirm('Загрузить только отмеченные корректные строки в основные данные?');">
+                    Загрузить отмеченные
                 </button>
             </div>
         </form>

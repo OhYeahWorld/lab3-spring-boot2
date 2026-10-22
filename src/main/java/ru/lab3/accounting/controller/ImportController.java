@@ -295,6 +295,7 @@ public class ImportController {
         private String incoming = "";
         private String apartment = "";
         private String problem = "";
+        private boolean selected;
 
         public static ParsedRowForm from(StatementImportService.ImportRow row) {
             ParsedRowForm f = new ParsedRowForm();
@@ -340,6 +341,8 @@ public class ImportController {
         public void setApartment(String apartment) { this.apartment = apartment; }
         public String getProblem() { return problem; }
         public void setProblem(String problem) { this.problem = problem; }
+        public boolean isSelected() { return selected; }
+        public void setSelected(boolean selected) { this.selected = selected; }
 
         /**
          * Собирает строку данных из полей формы. Поля принимаются в любом

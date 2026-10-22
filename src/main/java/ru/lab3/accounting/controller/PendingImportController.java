@@ -74,6 +74,7 @@ public class PendingImportController {
         }
         try {
             List<PendingImportRow> rows = findRows(forms);
+            boolean anySelected = forms.stream().anyMatch(ImportController.ParsedRowForm::isSelected);
             for (int i = 0; i < rows.size(); i++) {
                 rows.get(i).apply(forms.get(i).toRow());
                 pendingImportService.save(rows.get(i));
@@ -81,10 +82,12 @@ public class PendingImportController {
 
             int importedPayments = 0;
             int importedCharges = 0;
-            int remaining = 0;
-            for (PendingImportRow row : rows) {
+            for (int i = 0; i < rows.size(); i++) {
+                if (!forms.get(i).isSelected()) {
+                    continue;
+                }
+                PendingImportRow row = rows.get(i);
                 if (StatementImportService.recomputeProblem(row.toImportRow()) != null) {
-                    remaining++;
                     continue;
                 }
                 StatementImportService.ImportResult result =
@@ -96,12 +99,14 @@ public class PendingImportController {
                 } else {
                     row.setProblem(result.problems().get(0));
                     pendingImportService.save(row);
-                    remaining++;
                 }
             }
-            redirectAttributes.addFlashAttribute("success",
-                    "Загружено исправленных записей: платежей %d, начислений %d. Осталось в очереди: %d."
-                            .formatted(importedPayments, importedCharges, remaining));
+            int remaining = pendingImportService.list().size();
+            String message = anySelected
+                    ? "Загружено отмеченных записей: платежей %d, начислений %d. Осталось в очереди: %d."
+                    .formatted(importedPayments, importedCharges, remaining)
+                    : "Изменения сохранены. Отметьте галочками записи, которые нужно загрузить.";
+            redirectAttributes.addFlashAttribute("success", message);
         } catch (IllegalArgumentException ex) {
             redirectAttributes.addFlashAttribute("error", ex.getMessage());
         } catch (DataAccessException ex) {
@@ -156,6 +161,7 @@ public class PendingImportController {
                 case "apartment" -> form.setApartment(value);
                 case "party" -> form.setParty(value);
                 case "purpose" -> form.setPurpose(value);
+                case "selected" -> form.setSelected("1".equals(value) || "true".equalsIgnoreCase(value));
                 default -> {
                 }
             }

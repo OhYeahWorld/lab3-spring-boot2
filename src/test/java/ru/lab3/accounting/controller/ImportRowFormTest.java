@@ -8,7 +8,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ImportRowFormTest {
     @Test
@@ -37,5 +39,14 @@ class ImportRowFormTest {
 
         assertEquals(Boolean.FALSE, restored.typeKnown());
         assertNull(StatementImportService.recomputeProblem(restored));
+    }
+
+    @Test
+    void keepsSelectionExplicitlyOffByDefault() {
+        ImportController.ParsedRowForm form = new ImportController.ParsedRowForm();
+
+        assertFalse(form.isSelected());
+        form.setSelected(true);
+        assertTrue(form.isSelected());
     }
 }
