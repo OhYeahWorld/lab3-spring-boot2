@@ -41,30 +41,30 @@
                     <tbody>
                     <tr th:each="row, st : ${parsedRows}">
                         <td>
-                            <input type="hidden" th:name="'rows[' + st.index + '].orderNo'" th:value="${row.orderNo}">
+                            <input type="hidden" th:name="|rows[${st.index}].orderNo|" th:value="${row.orderNo}">
                             <span th:text="${row.orderNo}">1</span>
                         </td>
                         <td><input type="text" size="12"
-                                   th:name="'rows[' + st.index + '].date'" th:value="${row.date}"></td>
+                                   th:name="|rows[${st.index}].date|" th:value="${row.date}"></td>
                         <td><input type="text" size="6"
-                                   th:name="'rows[' + st.index + '].time'" th:value="${row.time}"></td>
+                                   th:name="|rows[${st.index}].time|" th:value="${row.time}"></td>
                         <td>
-                            <select th:name="'rows[' + st.index + '].incoming'">
+                            <select th:name="|rows[${st.index}].incoming|">
                                 <option value="" th:selected="${row.incoming == ''}">—</option>
                                 <option value="1" th:selected="${row.incoming == '1'}">Поступление</option>
                                 <option value="0" th:selected="${row.incoming == '0'}">Списание</option>
                             </select>
                         </td>
                         <td><input type="text" size="12"
-                                   th:name="'rows[' + st.index + '].amount'" th:value="${row.amount}"></td>
+                                   th:name="|rows[${st.index}].amount|" th:value="${row.amount}"></td>
                         <td><input type="text" size="6"
-                                   th:name="'rows[' + st.index + '].apartment'" th:value="${row.apartment}"></td>
+                                   th:name="|rows[${st.index}].apartment|" th:value="${row.apartment}"></td>
                         <td><input type="text" size="20"
-                                   th:name="'rows[' + st.index + '].party'" th:value="${row.party}"></td>
+                                   th:name="|rows[${st.index}].party|" th:value="${row.party}"></td>
                         <td><input type="text" size="24"
-                                   th:name="'rows[' + st.index + '].purpose'" th:value="${row.purpose}"></td>
+                                   th:name="|rows[${st.index}].purpose|" th:value="${row.purpose}"></td>
                         <td class="danger" style="max-width:220px">
-                            <input type="hidden" th:name="'rows[' + st.index + '].problem'" th:value="${row.problem}">
+                            <input type="hidden" th:name="|rows[${st.index}].problem|" th:value="${row.problem}">
                             <span th:text="${row.problem}"></span>
                         </td>
                     </tr>

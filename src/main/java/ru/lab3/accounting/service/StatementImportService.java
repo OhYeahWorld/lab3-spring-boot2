@@ -54,8 +54,8 @@ import java.util.regex.Pattern;
  *  3) Простой CSV/TSV с датой в первой колонке.
  *
  * Файл читается потоковым SAX-ридером POI в «сетку» отформатированных строк,
- * поэтому большие выписки не требуют много памяти. Если в файле есть лист с
- * таблицей операций, блоки из остальных листов не разбираются.
+ * поэтому большие выписки не требуют много памяти. Таблицы операций и блоки
+ * платёжных поручений разбираются на всех листах файла.
  *
  * Тип операции определяется по позиции нашего расчётного счёта (самый частый
  * номер вида 40xxxxxxxxxxxxxxxxx): по КРЕДИТУ — поступление, по ДЕБЕТУ —
@@ -203,21 +203,27 @@ public class StatementImportService {
         }
         List<List<String[]>> sheets = readWorkbook(content);
 
-        // Сначала ищем лист с таблицей операций — он однозначен и компактен.
+        // Выписка операций и платёжные поручения могут находиться на разных листах.
         List<ImportRow> tableRows = new ArrayList<>();
         for (List<String[]> grid : sheets) {
             tableRows.addAll(parseOperationTable(grid));
         }
-        if (!tableRows.isEmpty()) {
-            return renumber(deduplicateExact(tableRows));
-        }
-        // Таблицы нет — разбираем печатные бланки поручений.
         List<ImportRow> blockRows = new ArrayList<>();
         for (List<String[]> grid : sheets) {
             blockRows.addAll(parseBlocks(grid));
         }
-        if (!blockRows.isEmpty()) {
-            return renumber(blockRows);
+        if (!tableRows.isEmpty() || !blockRows.isEmpty()) {
+            tableRows = deduplicateExact(tableRows);
+            Set<String> unmatchedTableRows = new HashSet<>();
+            for (ImportRow row : tableRows) {
+                unmatchedTableRows.add(exactDuplicateKey(row));
+            }
+            for (ImportRow row : blockRows) {
+                if (!unmatchedTableRows.remove(exactDuplicateKey(row))) {
+                    tableRows.add(row);
+                }
+            }
+            return renumber(tableRows);
         }
         throw new IllegalArgumentException(
                 "в файле нет ни таблицы операций («Дата проводки / Сумма по дебету / Сумма по кредиту»), "
@@ -233,12 +239,15 @@ public class StatementImportService {
         List<ImportRow> unique = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (ImportRow r : rows) {
-            String key = r.executedAt() + "|" + r.party() + "|" + r.amount() + "|" + r.typeKnown();
-            if (seen.add(key)) {
+            if (seen.add(exactDuplicateKey(r))) {
                 unique.add(r);
             }
         }
         return unique;
+    }
+
+    private static String exactDuplicateKey(ImportRow row) {
+        return row.executedAt() + "|" + row.party() + "|" + row.amount() + "|" + row.typeKnown();
     }
 
     /** Последовательная нумерация строк предпросмотра. */
