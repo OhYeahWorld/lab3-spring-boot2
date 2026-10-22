@@ -41,6 +41,24 @@ CREATE TABLE IF NOT EXISTS payments (
     version BIGINT NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS pending_import_rows (
+    id BIGSERIAL PRIMARY KEY,
+    source_file TEXT NOT NULL DEFAULT '',
+    order_no INTEGER NOT NULL,
+    operation_date DATE,
+    executed_at TIMESTAMP,
+    amount NUMERIC(14,2),
+    party TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    type_known BOOLEAN,
+    apartment_number INTEGER,
+    problem TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_pending_import_rows_created_at
+    ON pending_import_rows(created_at, id);
+
 -- ------------------------------------------------------------
 -- Миграции поверх баз, созданных предыдущими версиями схемы.
 -- Всё идемпотентно: повторный запуск безопасен.

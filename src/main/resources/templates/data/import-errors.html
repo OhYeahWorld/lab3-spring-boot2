@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru" xmlns:th="http://www.thymeleaf.org">
+<head th:replace="~{fragments/header :: head('Ошибки импорта')}"></head>
+<body>
+<div th:replace="~{fragments/header :: nav}"></div>
+<main class="wrap page">
+    <div class="page-title">
+        <div><p class="eyebrow">Временное хранилище</p><h1>Ошибки импорта</h1></div>
+    </div>
+    <div th:replace="~{fragments/messages :: messages}"></div>
+
+    <section class="card">
+        <div class="card-head">
+            <h2>Строки, ожидающие исправления</h2>
+            <span class="hint" th:text="|В очереди: ${#lists.size(rows)}|">В очереди: 0</span>
+        </div>
+        <p class="hint">Эти записи не попали в основные данные. Исправьте дату, тип операции, сумму и квартиру,
+            затем нажмите «Сохранить и загрузить корректные». Неразрешённые строки останутся здесь до следующей правки.
+            После успешной загрузки запись удаляется из очереди.</p>
+
+        <form th:if="${!#lists.isEmpty(rows)}" th:action="@{/data/import/errors/import}" method="post">
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Файл / №</th><th>Дата</th><th>Время</th><th>Тип</th><th>Сумма</th>
+                        <th>Квартира</th><th>Контрагент</th><th>Назначение</th><th>Замечание</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <tr th:each="row, st : ${rows}">
+                        <td>
+                            <input type="hidden" th:name="|rows[${st.index}].pendingId|" th:value="${row.pendingId}">
+                            <input type="hidden" th:name="|rows[${st.index}].orderNo|" th:value="${row.orderNo}">
+                            <span th:text="${row.sourceFile}">выписка.xlsx</span>
+                            <small>строка <span th:text="${row.orderNo}">1</span></small>
+                        </td>
+                        <td><input type="text" size="12" th:name="|rows[${st.index}].date|" th:value="${row.date}"></td>
+                        <td><input type="text" size="6" th:name="|rows[${st.index}].time|" th:value="${row.time}"></td>
+                        <td>
+                            <select th:name="|rows[${st.index}].incoming|">
+                                <option value="" th:selected="${row.incoming == ''}">—</option>
+                                <option value="1" th:selected="${row.incoming == '1'}">Поступление</option>
+                                <option value="0" th:selected="${row.incoming == '0'}">Списание</option>
+                            </select>
+                        </td>
+                        <td><input type="text" size="12" th:name="|rows[${st.index}].amount|" th:value="${row.amount}"></td>
+                        <td><input type="text" size="6" th:name="|rows[${st.index}].apartment|" th:value="${row.apartment}"></td>
+                        <td><input type="text" size="20" th:name="|rows[${st.index}].party|" th:value="${row.party}"></td>
+                        <td><input type="text" size="24" th:name="|rows[${st.index}].purpose|" th:value="${row.purpose}"></td>
+                        <td class="danger" style="max-width:220px" th:text="${row.problem}"></td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="form-actions" style="display:flex; gap:12px; margin-top:16px;">
+                <button class="button" type="submit" th:formaction="@{/data/import/errors/save}">
+                    Сохранить изменения
+                </button>
+                <button class="button primary" type="submit"
+                        onclick="return confirm('Загрузить все корректные строки в основные данные?');">
+                    Сохранить и загрузить корректные
+                </button>
+            </div>
+        </form>
+        <p class="empty" th:if="${#lists.isEmpty(rows)}">
+            Очередь пуста. Строки с ошибками из новых выписок появятся здесь после импорта.
+        </p>
+    </section>
+</main>
+</body>
+</html>

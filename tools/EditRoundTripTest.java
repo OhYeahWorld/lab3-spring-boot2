@@ -68,7 +68,8 @@ public class EditRoundTripTest {
     public static void main(String[] args) throws Exception {
         StatementImportService svc = new StatementImportService(null, null, null, null);
         ParsedRowsStore store = new ParsedRowsStore();
-        ImportController controller = new ImportController(svc, null, store);
+        ImportController controller = new ImportController(svc, null, store,
+                ImportTestSupport.pendingImportService());
 
         byte[] bytes = Files.readAllBytes(Path.of(args[0]));
         MockMultipartFile file = new MockMultipartFile("file", "выписка.xlsx",

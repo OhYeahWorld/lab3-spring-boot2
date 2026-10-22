@@ -13,6 +13,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 import ru.lab3.accounting.service.LedgerService;
 import ru.lab3.accounting.service.ParsedRowsStore;
+import ru.lab3.accounting.service.PendingImportService;
 import ru.lab3.accounting.service.StatementImportService;
 
 import java.math.BigDecimal;
@@ -32,12 +33,14 @@ public class ImportController {
     private final StatementImportService importService;
     private final LedgerService ledgerService;
     private final ParsedRowsStore rowsStore;
+    private final PendingImportService pendingImportService;
 
     public ImportController(StatementImportService importService, LedgerService ledgerService,
-                            ParsedRowsStore rowsStore) {
+                            ParsedRowsStore rowsStore, PendingImportService pendingImportService) {
         this.importService = importService;
         this.ledgerService = ledgerService;
         this.rowsStore = rowsStore;
+        this.pendingImportService = pendingImportService;
     }
 
     @GetMapping
@@ -101,7 +104,8 @@ public class ImportController {
     public String commit(HttpServletRequest request,
                          HttpSession session,
                          Model model,
-                         RedirectAttributes ra) {
+                         RedirectAttributes ra,
+                         @RequestParam(value = "fileName", required = false) String fileName) {
         List<ParsedRowForm> safe = collectRows(request);
         if (safe.isEmpty()) {
             model.addAttribute("error", "Не удалось получить строки: загрузите файл выписки заново "
@@ -111,12 +115,24 @@ public class ImportController {
         }
         try {
             List<StatementImportService.ImportRow> importRows = new ArrayList<>();
+            List<StatementImportService.ImportRow> unresolvedRows = new ArrayList<>();
             for (ParsedRowForm f : safe) {
-                importRows.add(f.toRow());
+                StatementImportService.ImportRow row = f.toRow();
+                if (StatementImportService.recomputeProblem(row) == null) {
+                    importRows.add(row);
+                } else {
+                    unresolvedRows.add(row);
+                }
             }
+            int unresolvedSaved = pendingImportService.saveUnresolved(
+                    resolveFileName(fileName, session), unresolvedRows);
             StatementImportService.ImportResult result = importService.importRows(importRows);
             StringBuilder msg = new StringBuilder("Импорт завершён: платежей %d, начислений %d, сальдо %d."
                     .formatted(result.paymentsCreated(), result.chargesCreated(), result.saldoCreated()));
+            if (unresolvedSaved > 0) {
+                msg.append(" Строк с ошибками сохранено отдельно: ").append(unresolvedSaved)
+                        .append(". Исправить их можно в разделе «Ошибки импорта».");
+            }
             if (!result.problems().isEmpty()) {
                 msg.append(" Пропущено строк: ").append(result.problems().size()).append('.');
                 ra.addFlashAttribute("error", "Пропущенные строки: "
@@ -269,6 +285,8 @@ public class ImportController {
                 Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
         private Integer orderNo;
+        private Long pendingId;
+        private String sourceFile = "";
         private String date = "";
         private String time = "";
         private String amount = "";
@@ -293,8 +311,19 @@ public class ImportController {
             return f;
         }
 
+        public static ParsedRowForm from(ru.lab3.accounting.model.PendingImportRow row) {
+            ParsedRowForm form = from(row.toImportRow());
+            form.pendingId = row.getId();
+            form.sourceFile = row.getSourceFile();
+            return form;
+        }
+
         public Integer getOrderNo() { return orderNo; }
         public void setOrderNo(Integer orderNo) { this.orderNo = orderNo; }
+        public Long getPendingId() { return pendingId; }
+        public void setPendingId(Long pendingId) { this.pendingId = pendingId; }
+        public String getSourceFile() { return sourceFile; }
+        public void setSourceFile(String sourceFile) { this.sourceFile = sourceFile; }
         public String getDate() { return date; }
         public void setDate(String date) { this.date = date; }
         public String getTime() { return time; }
@@ -363,7 +392,7 @@ public class ImportController {
                             ? java.time.LocalTime.MIDNIGHT : parsedTime),
                     parsedAmount,
                     party == null ? "" : party, purpose == null ? "" : purpose,
-                    "1".equals(incoming), parsedApartment, null);
+                    parsedTypeKnown, parsedApartment, null);
         }
 
         /** Номер квартиры из текстового поля: чистое число либо подсказка «кв. 164», «л/с 134». */

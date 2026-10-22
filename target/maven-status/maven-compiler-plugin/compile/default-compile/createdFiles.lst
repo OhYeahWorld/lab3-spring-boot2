@@ -14,8 +14,10 @@ ru/lab3/accounting/dto/SaldoForm.class
 ru/lab3/accounting/config/TimeConfig.class
 ru/lab3/accounting/model/Saldo.class
 ru/lab3/accounting/model/Charge.class
+ru/lab3/accounting/service/PendingImportService.class
 ru/lab3/accounting/controller/ImportController$ParsedRowForm.class
 ru/lab3/accounting/dto/PaymentForm.class
+ru/lab3/accounting/model/PendingImportRow.class
 ru/lab3/accounting/controller/HomeController.class
 ru/lab3/accounting/repository/report/TurnoverRow.class
 ru/lab3/accounting/dto/ChargeForm.class
@@ -29,6 +31,8 @@ ru/lab3/accounting/model/Payment.class
 ru/lab3/accounting/service/StatementImportService.class
 ru/lab3/accounting/repository/SaldoRepository.class
 ru/lab3/accounting/repository/report/DebtorReportRow.class
+ru/lab3/accounting/repository/PendingImportRowRepository.class
+ru/lab3/accounting/controller/PendingImportController.class
 ru/lab3/accounting/config/TimeFormat.class
 ru/lab3/accounting/service/StatementImportService$TableLayout.class
 ru/lab3/accounting/service/LedgerService.class
